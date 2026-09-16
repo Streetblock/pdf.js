@@ -2748,7 +2748,7 @@ gulp.task("lint-licenses", function (done) {
   console.log("\n### Checking license headers");
 
   const jsRE =
-    /^(?:#[^\n]*\n)?\/\* Copyright \d{4} Mozilla Foundation\n \*\n \* Licensed under the Apache License, Version 2\.0 \(the "License"\);/;
+    /^(?:#[^\n]*\n)?\/\* Copyright \d{4} (?:Mozilla Foundation|Streetblock)\n \*\n \* Licensed under the Apache License, Version 2\.0 \(the "License"\);/;
   const htmlRE = /^<!doctype html>\n<!--\nCopyright \d{4} Mozilla Foundation\n/;
 
   // Files with non-standard license headers (different copyright holder,

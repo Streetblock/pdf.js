@@ -440,6 +440,10 @@ class WorkerMessageHandler {
       return pdfManager.ensureCatalog("openAction");
     });
 
+    handler.on("GetEmbeddedFileInspection", function () {
+      return pdfManager.ensureCatalog("getEmbeddedFileInspection");
+    });
+
     handler.on("GetAttachments", function () {
       return pdfManager.ensureCatalog("attachments");
     });

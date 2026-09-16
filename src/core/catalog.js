@@ -51,6 +51,7 @@ import { BaseStream } from "./base_stream.js";
 import { clearGlobalCaches } from "./cleanup_helper.js";
 import { ColorSpaceUtils } from "./colorspace_utils.js";
 import { FileSpec } from "./file_spec.js";
+import { inspectEmbeddedFiles } from "./embedded_file_inspection.js";
 import { MetadataParser } from "./metadata_parser.js";
 import { soundStreamToWav } from "./sound.js";
 import { stringToPDFString } from "./string_utils.js";
@@ -1118,6 +1119,10 @@ class Catalog {
       openAction.set("dest", obj);
     }
     return shadow(this, "openAction", openAction.size ? openAction : null);
+  }
+
+  getEmbeddedFileInspection() {
+    return inspectEmbeddedFiles(this.#catDict, this.xref);
   }
 
   /**

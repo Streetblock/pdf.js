@@ -820,6 +820,13 @@ class XRef {
     throw new XRefParseException();
   }
 
+  get inspectionState() {
+    return {
+      recoveryMode: this.#parsedWithRecovery,
+      xrefSectionsComplete: this.#xrefSectionsComplete,
+    };
+  }
+
   countUpdatesAfter(offset) {
     if (this.#parsedWithRecovery || !this.#xrefSectionsComplete) {
       return null;
