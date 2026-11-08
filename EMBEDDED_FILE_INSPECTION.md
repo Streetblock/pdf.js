@@ -62,6 +62,20 @@ must be passed unchanged to the XML engine and hashed to bind its result to the
 PDF. They are not the compressed stream bytes in the PDF file. Stream read
 errors and limits never return a truncated byte array as a complete attachment.
 
+## PDF/A file trailer evidence
+
+The separate experimental PDFDocumentProxy.getPdfAFileInspection() method
+returns the parser diagnostics and the effective trailer's typed ID and Encrypt
+key evidence for PDF/A file rules. The ID array length and the type and byte
+length of its first two elements are reported without disclosing their contents.
+Indirect ID values remain unresolved. The trailer is null when the cross-
+reference parse is incomplete or used recovery. Linearized files use the
+first-page trailer selected by the existing PDF.js parser.
+
+This method requires a loaded document. PDF.js rejects a password-protected
+document without its password before the method can be called. Neither this
+trailer snapshot nor a successful document load establishes PDF/A conformance.
+
 ## Limits and unimplemented checks
 
 Traversal is capped at 256 name-tree nodes, depth 32, and 512 combined name-tree

@@ -444,6 +444,10 @@ class WorkerMessageHandler {
       return pdfManager.ensureCatalog("getEmbeddedFileInspection");
     });
 
+    handler.on("GetPdfAFileInspection", function () {
+      return pdfManager.ensureDoc("getPdfAFileInspection");
+    });
+
     handler.on("GetAttachments", function () {
       return pdfManager.ensureCatalog("attachments");
     });

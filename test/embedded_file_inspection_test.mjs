@@ -30,6 +30,7 @@ const hash = value => createHash("sha256").update(value).digest("hex");
 
 // Byte-accurate, synthetic test PDFs; no invoice or font/rendering dependency.
 function fixture(options = {}) {
+  const trailerFields = options.trailerFields ?? "";
   const stream = (data, dict) => {
     if (options.compressed) {
       data = deflateSync(Buffer.from(data, "latin1")).toString("latin1");
@@ -113,7 +114,7 @@ function fixture(options = {}) {
       11,
       stream(
         entries.toString("latin1"),
-        "/Type /XRef /Size 12 /Root 1 0 R /W [1 4 2]"
+        `/Type /XRef /Size 12 /Root 1 0 R /W [1 4 2]${trailerFields}`
       )
     );
   } else {
@@ -122,7 +123,7 @@ function fixture(options = {}) {
     for (let i = 1; i < size; i++) {
       pdf += `${String(offsets.get(i) || 0).padStart(10, "0")} 00000 ${offsets.has(i) ? "n" : "f"} \n`;
     }
-    pdf += `trailer\n<< /Size ${size} /Root 1 0 R >>\n`;
+    pdf += `trailer\n<< /Size ${size} /Root 1 0 R${trailerFields} >>\n`;
   }
   pdf += `startxref\n${options.recovery ? 1 : xref}\n%%EOF\n`;
   if (options.incremental) {
@@ -136,7 +137,7 @@ function fixture(options = {}) {
     );
     const previous = xref;
     xref = pdf.length;
-    pdf += `xref\n1 1\n${String(offsets.get(1)).padStart(10, "0")} 00000 n \n5 1\n${String(offsets.get(5)).padStart(10, "0")} 00000 n \ntrailer\n<< /Size 8 /Root 1 0 R /Prev ${previous} >>\nstartxref\n${xref}\n%%EOF\n`;
+    pdf += `xref\n1 1\n${String(offsets.get(1)).padStart(10, "0")} 00000 n \n5 1\n${String(offsets.get(5)).padStart(10, "0")} 00000 n \ntrailer\n<< /Size 8 /Root 1 0 R /Prev ${previous}${options.incrementalTrailerFields ?? ""} >>\nstartxref\n${xref}\n%%EOF\n`;
   }
   return bytes(pdf);
 }
@@ -159,6 +160,7 @@ const cases = [
   ["recovered cross-reference table", { recovery: true }],
 ];
 const results = new Map();
+const pdfAFileResults = new Map();
 const normalize = value =>
   JSON.parse(
     JSON.stringify(value, (_key, v) =>
@@ -175,6 +177,7 @@ for (const [name, options] of cases) {
       const doc = await task.promise;
       const result = await doc.getEmbeddedFileInspection();
       results.set(name, normalize(result));
+      pdfAFileResults.set(name, await doc.getPdfAFileInspection());
       assert.equal(result.version, 1);
       assert.equal(result.parser.diagnosticsComplete, false);
       assert.equal(result.parser.recoveryMode, !!options.recovery);
@@ -240,6 +243,55 @@ for (const [name, options] of cases) {
   });
 }
 
+test("read typed PDF/A trailer evidence without exposing ID bytes", async () => {
+  const string = byteLength => ({ type: "string", byteLength });
+  const fileId = (length, entries) => ({ type: "array", length, entries });
+  const scenarios = [
+    [{}, { id: { type: "missing" }, hasEncrypt: false }],
+    [
+      { trailerFields: " /ID null" },
+      { id: { type: "null" }, hasEncrypt: false },
+    ],
+    [
+      { trailerFields: " /ID /Name" },
+      { id: { type: "other" }, hasEncrypt: false },
+    ],
+    [
+      { trailerFields: " /ID [() 7 0 R (unreported)] /Encrypt null" },
+      { id: fileId(3, [string(0), { type: "reference" }]), hasEncrypt: true },
+    ],
+    [
+      { objectStream: true, trailerFields: " /ID [<0102> <030405>]" },
+      { id: fileId(2, [string(2), string(3)]), hasEncrypt: false },
+    ],
+    [
+      {
+        incremental: true,
+        trailerFields: " /ID [<0102> <030405>]",
+        incrementalTrailerFields: " /ID [<0102> <06070809>]",
+      },
+      { id: fileId(2, [string(2), string(4)]), hasEncrypt: false },
+    ],
+    [{ recovery: true, trailerFields: " /ID [<0102> <030405>]" }, null],
+    [{ trailerFields: " /Prev 1 /ID [<0102> <030405>]" }, null],
+  ];
+  for (const [options, expected] of scenarios) {
+    const task = getDocument({
+      data: fixture(options),
+      isEvalSupported: false,
+    });
+    try {
+      const doc = await task.promise;
+      const result = await doc.getPdfAFileInspection();
+      assert.equal(result.version, 1);
+      assert.equal(result.parser.diagnosticsComplete, false);
+      assert.deepEqual(result.trailer, expected, JSON.stringify(options));
+    } finally {
+      await task.destroy();
+    }
+  }
+});
+
 test(
   "browser worker and Node return identical evidence",
   { skip: !process.env.PDFJS_TEST_BROWSER },
@@ -295,6 +347,7 @@ test(
                     v instanceof Uint8Array ? Array.from(v) : v
                   )
                 ),
+                await doc.getPdfAFileInspection(),
               ]);
             } finally {
               await task.destroy();
@@ -305,8 +358,9 @@ test(
         cases.map(([name, options]) => [name, Array.from(fixture(options))])
       );
       assert.equal(browserResults.length, cases.length);
-      for (const [name, result] of browserResults) {
+      for (const [name, result, pdfAFile] of browserResults) {
         assert.deepEqual(result, results.get(name), name);
+        assert.deepEqual(pdfAFile, pdfAFileResults.get(name), name);
       }
     } finally {
       await browser?.close();

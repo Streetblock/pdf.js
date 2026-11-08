@@ -863,6 +863,15 @@ class PDFDocumentProxy {
   }
 
   /**
+   * Read typed file trailer evidence for a PDF/A validator. This experimental
+   * Streetblock API returns neither file identifier bytes nor a rule result.
+   * @returns {Promise<object>} Bounded evidence for the effective trailer.
+   */
+  getPdfAFileInspection() {
+    return this._transport.getPdfAFileInspection();
+  }
+
+  /**
    * @param {string} id
    *   Unique attachment identifier (required).
    * @returns {Promise<CatalogAttachmentContent>}
@@ -3170,6 +3179,10 @@ class WorkerTransport {
       "GetEmbeddedFileInspection",
       null
     );
+  }
+
+  getPdfAFileInspection() {
+    return this.messageHandler.sendWithPromise("GetPdfAFileInspection", null);
   }
 
   /**

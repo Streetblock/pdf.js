@@ -1155,6 +1155,47 @@ class PDFDocument {
     this.xref.setStartXRef(this.startXRef);
   }
 
+  getPdfAFileInspection() {
+    const { recoveryMode, xrefSectionsComplete } = this.xref.inspectionState;
+    const parser = {
+      recoveryMode,
+      xrefSectionsComplete,
+      diagnosticsComplete: false,
+    };
+    // XRef normally retains the latest effective trailer. A recovered or
+    // incomplete cross-reference chain cannot establish which trailer applies.
+    const trailer = this.xref.trailer;
+    if (recoveryMode || !xrefSectionsComplete || !(trailer instanceof Dict)) {
+      return { version: 1, parser, trailer: null };
+    }
+
+    const value = trailer.getRaw("ID");
+    let id;
+    if (Array.isArray(value)) {
+      id = {
+        type: "array",
+        length: value.length,
+        entries: value.slice(0, 2).map(entry => {
+          if (typeof entry === "string") {
+            return { type: "string", byteLength: entry.length };
+          }
+          return { type: entry instanceof Ref ? "reference" : "other" };
+        }),
+      };
+    } else if (!trailer.has("ID")) {
+      id = { type: "missing" };
+    } else if (value === null) {
+      id = { type: "null" };
+    } else {
+      id = { type: value instanceof Ref ? "reference" : "other" };
+    }
+    return {
+      version: 1,
+      parser,
+      trailer: { id, hasEncrypt: trailer.has("Encrypt") },
+    };
+  }
+
   get numPages() {
     let num = 0;
     if (this.catalog.hasActualNumPages) {
