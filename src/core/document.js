@@ -69,6 +69,7 @@ import { clearGlobalCaches } from "./cleanup_helper.js";
 import { DatasetReader } from "./dataset_reader.js";
 import { inspectPdfADocument } from "./pdfa_document_inspection.js";
 import { inspectPdfAEmbeddedFiles } from "./pdfa_embedded_file_inspection.js";
+import { inspectPdfAFonts } from "./pdfa_font_inspection.js";
 import { inspectPdfAXRef } from "./pdfa_xref_inspection.js";
 import { Intersector } from "./intersector.js";
 import { Linearization } from "./parser.js";
@@ -1176,6 +1177,7 @@ class PDFDocument {
       !recoveryMode && xrefSectionsComplete && trailer instanceof Dict;
     const document = inspectPdfADocument(this.xref, trusted);
     const embeddedFiles = inspectPdfAEmbeddedFiles(this.xref, trusted);
+    const fonts = await inspectPdfAFonts(this.xref, trusted);
     if (!trusted) {
       return {
         version: 1,
@@ -1184,6 +1186,7 @@ class PDFDocument {
         xref,
         document,
         embeddedFiles,
+        fonts,
       };
     }
 
@@ -1214,6 +1217,7 @@ class PDFDocument {
       xref,
       document,
       embeddedFiles,
+      fonts,
     };
   }
 

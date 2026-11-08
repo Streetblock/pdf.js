@@ -223,3 +223,24 @@ name-tree coverage. Non-predefined AFRelationship names remain open.
 `getEmbeddedFileInspection({ metadataOnly: true })` preserves the existing
 evidence format and reads only the original decoded XMP metadata stream.
 Attachment and association arrays are left empty in this mode.
+
+
+### PDF/A font use
+
+The version-1 file inspection includes an optional `fonts` group of findings
+and counts for PDF/A rules 6.2.11.4.1-1 (embedded font programs),
+6.2.11.4.1-2 (used glyph presence), and 6.2.11.8-1 (.notdef). Evidence
+comes from the original decoded contents and PDF font dictionaries. The
+renderer, its substitutes, Unicode conversion and repaired font tables
+are not used. The scanner follows shown text, the graphics-state stack,
+page resources, and invoked Form and Type 3 content. Only text rendering
+mode 3 is exempt from embedding and glyph presence. Glyph zero is a
+separate prohibited reference, including in invisible text.
+
+Used-glyph coverage currently includes explicitly encoded Type 3
+procedures and Identity-H/V CIDFontType2 glyph mapping with original
+TrueType maxp, loca and glyf tables. A zero-length outline is allowed.
+Other glyph mappings and opaque appearance, pattern, soft-mask and
+inline-image paths stay open. Unfiltered and single-Flate streams are
+read with bounded byte and traversal budgets. This is a partial font
+inspection and does not cover glyph geometry, widths or full PDF/A.

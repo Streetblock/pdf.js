@@ -635,3 +635,36 @@ test("XMP-only inspection keeps original bytes and skips a malformed name tree",
     await task.destroy();
   }
 });
+
+test("PDF/A font evidence restores text state across page content streams", async () => {
+  const stream = value =>
+    `<< /Length ${value.length} >>\nstream\n${value}\nendstream`;
+  const data = fixture({
+    documentObjects: [
+      [
+        3,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font << /F1 10 0 R >> >> /Contents [8 0 R 9 0 R] >>",
+      ],
+      [8, stream("BT /F1 12 Tf ET q BT 3 Tr (invisible) Tj ET\n")],
+      [9, stream("Q BT [(private-content-marker)] TJ ET")],
+      [
+        10,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+      ],
+    ],
+  });
+  const task = getDocument({ data, isEvalSupported: false });
+  try {
+    const doc = await task.promise;
+    const { fonts } = await doc.getPdfAFileInspection();
+    assert.equal(
+      fonts.checks.find(item => item.id === "6.2.11.4.1-1")?.status,
+      "fail"
+    );
+    assert.equal(fonts.counts.fonts, 1);
+    assert.equal(fonts.counts.streams, 2);
+    assert.doesNotMatch(JSON.stringify(fonts), /private-content-marker/);
+  } finally {
+    await task.destroy();
+  }
+});

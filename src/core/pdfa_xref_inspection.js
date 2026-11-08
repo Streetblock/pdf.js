@@ -951,4 +951,4 @@ async function inspectPdfAXRef(stream, { linearized, encrypted }) {
   return inspection.finish();
 }
 
-export { inspectPdfAXRef };
+export { inspectPdfAXRef, readFlate };
