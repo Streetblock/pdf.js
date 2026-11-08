@@ -292,6 +292,61 @@ test("read typed PDF/A trailer evidence without exposing ID bytes", async () => 
   }
 });
 
+test("read-only PDF/A cross-reference evidence", async () => {
+  const scenarios = [
+    [
+      fixture(),
+      [
+        ["6.1.4-2", "pass"],
+        ["PDF-XREF-TABLE", "pass"],
+      ],
+    ],
+    [
+      fixture({ objectStream: true, compressed: true }),
+      [
+        ["PDF-XREF-STREAM", "pass"],
+        ["PDF-OBJECT-STREAM", "pass"],
+      ],
+    ],
+    [
+      fixture({ incremental: true }),
+      [
+        ["PDF-XREF-PREV", "pass"],
+        ["PDF-XREF-ENTRY", "pass"],
+      ],
+    ],
+    [fixture({ recovery: true }), [["PDF-XREF-TARGET", "fail"]]],
+    [fixture({ trailerFields: " /Prev 1" }), [["PDF-XREF-PREV", "fail"]]],
+    [
+      bytes(
+        Buffer.from(fixture()).toString("latin1").replace("xref\n0", "xref 0")
+      ),
+      [
+        ["6.1.4-2", "fail"],
+        ["PDF-XREF-TABLE", "pass"],
+      ],
+    ],
+  ];
+  for (const [data, expected] of scenarios) {
+    const before = hash(data);
+    const task = getDocument({ data: data.slice(), isEvalSupported: false });
+    try {
+      const doc = await task.promise;
+      const { xref } = await doc.getPdfAFileInspection();
+      for (const [id, status] of expected) {
+        assert.equal(
+          xref.checks.find(result => result.id === id).status,
+          status,
+          id
+        );
+      }
+      assert.equal(hash(await doc.getData()), before);
+    } finally {
+      await task.destroy();
+    }
+  }
+});
+
 test(
   "browser worker and Node return identical evidence",
   { skip: !process.env.PDFJS_TEST_BROWSER },

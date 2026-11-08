@@ -67,6 +67,7 @@ import { calculateMD5 } from "./calculate_md5.js";
 import { Catalog } from "./catalog.js";
 import { clearGlobalCaches } from "./cleanup_helper.js";
 import { DatasetReader } from "./dataset_reader.js";
+import { inspectPdfAXRef } from "./pdfa_xref_inspection.js";
 import { Intersector } from "./intersector.js";
 import { Linearization } from "./parser.js";
 import { LocalColorSpaceCache } from "./image_utils.js";
@@ -1155,7 +1156,7 @@ class PDFDocument {
     this.xref.setStartXRef(this.startXRef);
   }
 
-  getPdfAFileInspection() {
+  async getPdfAFileInspection() {
     const { recoveryMode, xrefSectionsComplete } = this.xref.inspectionState;
     const parser = {
       recoveryMode,
@@ -1165,8 +1166,12 @@ class PDFDocument {
     // XRef normally retains the latest effective trailer. A recovered or
     // incomplete cross-reference chain cannot establish which trailer applies.
     const trailer = this.xref.trailer;
+    const xref = await inspectPdfAXRef(this.stream, {
+      linearized: !!this.linearization,
+      encrypted: !!this.xref.encrypt,
+    });
     if (recoveryMode || !xrefSectionsComplete || !(trailer instanceof Dict)) {
-      return { version: 1, parser, trailer: null };
+      return { version: 1, parser, trailer: null, xref };
     }
 
     const value = trailer.getRaw("ID");
@@ -1193,6 +1198,7 @@ class PDFDocument {
       version: 1,
       parser,
       trailer: { id, hasEncrypt: trailer.has("Encrypt") },
+      xref,
     };
   }
 

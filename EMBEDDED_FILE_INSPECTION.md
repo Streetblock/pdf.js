@@ -172,3 +172,21 @@ not yet a reduced parser-only distribution.
 
 New source files retain Streetblock copyright under Apache 2.0. The upstream
 license-header check accepts that holder as well as Mozilla Foundation.
+
+The same result now carries an additive xref member with checks and counts.
+It inspects the raw startxref target, classic subsection and fixed-width row
+syntax (including PDF/A rule 6.1.4-2), type-1 object offsets, XRef stream
+ranges and decoded lengths, primary Prev links, hybrid XRefStm links, and
+compressed index membership in ObjStm headers. These checks cover the
+footer-reachable chain, even if the renderer used recovery and could open the
+document. They do not examine detached or unreachable revisions.
+
+Statuses are pass, fail, unknown, or not-applicable for each check. The
+PDF-XREF and PDF-OBJECT identifiers describe local structural checks, rather
+than additional rule IDs from ISO 19005-3. Unknown includes unsupported
+filters and indirect stream lengths, linearized layouts, unreadable data,
+and exhausted inspection budgets. Structural decoding uses direct raw or
+Flate stream bytes with optional bounded TIFF/PNG prediction. Limits include
+a 20 MiB file, 128 primary revisions, 100,000 rows, 512 object streams,
+2 MiB decoded per stream and 8 MiB decoded in total. No normalized output
+replaces the original bytes. The result does not certify PDF/A conformance.
