@@ -39,13 +39,13 @@ function fixture(options = {}) {
     return `<< ${dict} /Length ${data.length} >>\nstream\n${data}\nendstream`;
   };
   const spec = `<< /Type /Filespec /F (factur-x.xml) /UF (factur-x.xml) /AFRelationship ${options.wrongRelationship ? "(Alternative)" : "/Alternative"} /EF << /F 5 0 R /UF ${options.conflictingStreams ? 9 : 5} 0 R >> >>`;
-  const catalog = `<< /Type /Catalog /Pages 2 0 R ${options.afOnly ? "" : "/Names << /EmbeddedFiles 7 0 R >>"} ${options.missingAF ? "" : "/AF [4 0 R]"} /Metadata 6 0 R >>`;
+  const catalog = `<< /Type /Catalog /Pages 2 0 R ${options.afOnly ? "" : "/Names << /EmbeddedFiles 7 0 R >>"} ${options.missingAF ? "" : "/AF [4 0 R]"} /Metadata 6 0 R ${options.catalogExtras ?? ""} >>`;
   const objects = new Map([
     [1, options.incremental ? "<< /Type /Catalog /Pages 2 0 R >>" : catalog],
     [2, "<< /Type /Pages /Count 1 /Kids [3 0 R] >>"],
     [
       3,
-      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>",
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> ${options.pageExtras ?? ""} >>`,
     ],
     [4, spec],
     [
@@ -69,6 +69,9 @@ function fixture(options = {}) {
         : `<< /Names [(factur-x.xml) 4 0 R ${options.duplicate ? "(factur-x.xml) 8 0 R" : ""}] >>`,
     ],
   ]);
+  for (const [id, body] of options.documentObjects ?? []) {
+    objects.set(id, body);
+  }
   if (options.duplicate) {
     objects.set(8, spec);
   }
@@ -472,3 +475,40 @@ test(
     }
   }
 );
+
+test("read-only PDF/A document graph evidence", async () => {
+  const data = fixture({
+    catalogExtras: "/OpenAction [3 0 R /Fit] /AA 70 0 R",
+    pageExtras: "/Annots [12 0 R]",
+    documentObjects: [
+      [
+        12,
+        "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /F 36 " +
+          "/A << /S /Named /N /NextPage /Next << /S /JavaScript /JS (marker-script-not-returned) >> >> >>",
+      ],
+    ],
+  });
+  const task = getDocument({ data });
+  try {
+    const pdf = await task.promise;
+    const { document } = await pdf.getPdfAFileInspection();
+    const checks = Object.fromEntries(
+      document.checks.map(check => [check.id, check])
+    );
+    assert.equal(checks["PDF-CATALOG"].status, "pass");
+    assert.equal(checks["PDF-PAGE-TREE"].status, "pass");
+    assert.equal(checks["PDF-ANNOTATION"].status, "pass");
+    assert.equal(checks["6.3.2-2"].status, "fail");
+    assert.equal(checks["6.3.3-1"].status, "not-applicable");
+    assert.equal(checks["6.5.1-1"].status, "fail");
+    assert.match(checks["6.5.1-1"].location, /Annots.*Next/);
+    assert.equal(checks["6.5.1-2"].status, "unknown");
+    assert.equal(checks["6.5.2-1"].status, "unknown");
+    assert.equal(document.counts.pages, 1);
+    assert.equal(document.counts.annotations, 1);
+    assert.equal(document.counts.actions, 2);
+    assert.doesNotMatch(JSON.stringify(document), /marker-script-not-returned/);
+  } finally {
+    await task.destroy();
+  }
+});

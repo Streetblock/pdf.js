@@ -190,3 +190,19 @@ Flate stream bytes with optional bounded TIFF/PNG prediction. Limits include
 a 20 MiB file, 128 primary revisions, 100,000 rows, 512 object streams,
 2 MiB decoded per stream and 8 MiB decoded in total. No normalized output
 replaces the original bytes. The result does not certify PDF/A conformance.
+
+The version-1 file inspection result also contains an additive document
+member with checks and counts. It inspects the effective catalog and page-tree
+topology, annotation dictionary shape, PDF/A subtype and flags, appearance
+presence and keys, and forbidden action entries and action types. Actions
+are read from the catalog, page, annotation, JavaScript name tree, outline,
+form-field and chained Next paths. No action is executed and script content
+is not included in the report.
+
+The graph uses raw PDF dictionary entries and verifies indirect references.
+It is limited to 48 traversal levels and 16,384 visits. Results remain
+unknown after cross-reference repair or if relevant objects or action paths
+cannot be established. A known failure takes precedence over unknown
+evidence from another path. This stage does not validate appearance streams,
+inherited appearance states, all possible PDF extensions, or full PDF/A
+conformance.

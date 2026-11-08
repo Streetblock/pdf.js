@@ -67,6 +67,7 @@ import { calculateMD5 } from "./calculate_md5.js";
 import { Catalog } from "./catalog.js";
 import { clearGlobalCaches } from "./cleanup_helper.js";
 import { DatasetReader } from "./dataset_reader.js";
+import { inspectPdfADocument } from "./pdfa_document_inspection.js";
 import { inspectPdfAXRef } from "./pdfa_xref_inspection.js";
 import { Intersector } from "./intersector.js";
 import { Linearization } from "./parser.js";
@@ -1170,8 +1171,11 @@ class PDFDocument {
       linearized: !!this.linearization,
       encrypted: !!this.xref.encrypt,
     });
-    if (recoveryMode || !xrefSectionsComplete || !(trailer instanceof Dict)) {
-      return { version: 1, parser, trailer: null, xref };
+    const trusted =
+      !recoveryMode && xrefSectionsComplete && trailer instanceof Dict;
+    const document = inspectPdfADocument(this.xref, trusted);
+    if (!trusted) {
+      return { version: 1, parser, trailer: null, xref, document };
     }
 
     const value = trailer.getRaw("ID");
@@ -1199,6 +1203,7 @@ class PDFDocument {
       parser,
       trailer: { id, hasEncrypt: trailer.has("Encrypt") },
       xref,
+      document,
     };
   }
 
