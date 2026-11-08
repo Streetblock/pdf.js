@@ -30,7 +30,7 @@ const LIMITS = Object.freeze({
 
 // Evidence only: this deliberately makes no PDF/A or invoice validity claim.
 // Preserve duplicate name-tree entries and both /F and /UF stream mappings.
-function inspectEmbeddedFiles(catalog, xref) {
+function inspectEmbeddedFiles(catalog, xref, metadataOnly = false) {
   const result = {
     version: 1,
     files: [],
@@ -270,39 +270,44 @@ function inspectEmbeddedFiles(catalog, xref) {
     }
   }
 
-  attempt("/Names", () => {
-    if (!catalog.has("Names")) {
-      return;
-    }
-    const names = catalog.get("Names");
-    if (!(names instanceof Dict)) {
-      issue("invalid-names-dictionary", "/Names");
-    } else if (names.has("EmbeddedFiles")) {
-      result.nameTreePresent = true;
-      walk(names.getRaw("EmbeddedFiles"), "/Names/EmbeddedFiles", 0);
-    }
-  });
-  attempt("/AF", () => {
-    if (!catalog.has("AF")) {
-      return;
-    }
-    result.associatedFiles = [];
-    const af = catalog.get("AF");
-    if (!Array.isArray(af)) {
-      issue("invalid-associated-files", "/AF");
-      return;
-    }
-    for (let i = 0; i < af.length; i++) {
-      const path = `/AF/${i}`;
-      if (!reserveEntry(path)) {
-        break;
+  if (!metadataOnly) {
+    inspectAttachmentReferences();
+  }
+  function inspectAttachmentReferences() {
+    attempt("/Names", () => {
+      if (!catalog.has("Names")) {
+        return;
       }
-      result.associatedFiles.push({
-        ref: af[i] instanceof Ref ? af[i].toString() : null,
-        fileId: attempt(path, () => file(af[i], path)),
-      });
-    }
-  });
+      const names = catalog.get("Names");
+      if (!(names instanceof Dict)) {
+        issue("invalid-names-dictionary", "/Names");
+      } else if (names.has("EmbeddedFiles")) {
+        result.nameTreePresent = true;
+        walk(names.getRaw("EmbeddedFiles"), "/Names/EmbeddedFiles", 0);
+      }
+    });
+    attempt("/AF", () => {
+      if (!catalog.has("AF")) {
+        return;
+      }
+      result.associatedFiles = [];
+      const af = catalog.get("AF");
+      if (!Array.isArray(af)) {
+        issue("invalid-associated-files", "/AF");
+        return;
+      }
+      for (let i = 0; i < af.length; i++) {
+        const path = `/AF/${i}`;
+        if (!reserveEntry(path)) {
+          break;
+        }
+        result.associatedFiles.push({
+          ref: af[i] instanceof Ref ? af[i].toString() : null,
+          fileId: attempt(path, () => file(af[i], path)),
+        });
+      }
+    });
+  }
   if (catalog.has("Metadata")) {
     result.metadata = attempt("/Metadata", () =>
       readStream(

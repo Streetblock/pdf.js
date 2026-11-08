@@ -206,3 +206,20 @@ cannot be established. A known failure takes precedence over unknown
 evidence from another path. This stage does not validate appearance streams,
 inherited appearance states, all possible PDF extensions, or full PDF/A
 conformance.
+
+### PDF/A-3 embedded files and metadata-only evidence
+
+The version-1 file inspection result includes an optional `embeddedFiles`
+group of bounded checks for PDF 1.7 file specification and stream dictionaries
+and PDF/A-3 rules 6.8-1 through 6.8-4. It does not read or return attachment
+contents. A catalog, page, annotation, structure element, image or Form
+XObject may supply an association. The EmbeddedFiles name tree alone supplies
+discovery, but not an association. Missing associations stay open if damaged
+references, traversal limits or uninspected content could hide another path.
+Unsupported marked-content and resource paths remain outside this partial
+inspection. There is no verdict about modification dates or exhaustive
+name-tree coverage. Non-predefined AFRelationship names remain open.
+
+`getEmbeddedFileInspection({ metadataOnly: true })` preserves the existing
+evidence format and reads only the original decoded XMP metadata stream.
+Attachment and association arrays are left empty in this mode.

@@ -856,10 +856,12 @@ class PDFDocumentProxy {
    * Read document-level embedded-file links and original decoded XMP/XML bytes.
    * Experimental Streetblock API; evidence only, not a PDF/A validation result.
    * Issues and incomplete parser diagnostics must not be interpreted as a pass.
+   * @param {object} [options]
+   * @param {boolean} [options.metadataOnly] Read only the original XMP stream.
    * @returns {Promise<object>} Structured, bounded inspection evidence.
    */
-  getEmbeddedFileInspection() {
-    return this._transport.getEmbeddedFileInspection();
+  getEmbeddedFileInspection({ metadataOnly = false } = {}) {
+    return this._transport.getEmbeddedFileInspection(metadataOnly === true);
   }
 
   /**
@@ -3174,11 +3176,10 @@ class WorkerTransport {
     return this.messageHandler.sendWithPromise("GetAttachments", null);
   }
 
-  getEmbeddedFileInspection() {
-    return this.messageHandler.sendWithPromise(
-      "GetEmbeddedFileInspection",
-      null
-    );
+  getEmbeddedFileInspection(metadataOnly) {
+    return this.messageHandler.sendWithPromise("GetEmbeddedFileInspection", {
+      metadataOnly,
+    });
   }
 
   getPdfAFileInspection() {

@@ -1121,8 +1121,8 @@ class Catalog {
     return shadow(this, "openAction", openAction.size ? openAction : null);
   }
 
-  getEmbeddedFileInspection() {
-    return inspectEmbeddedFiles(this.#catDict, this.xref);
+  getEmbeddedFileInspection(metadataOnly = false) {
+    return inspectEmbeddedFiles(this.#catDict, this.xref, metadataOnly);
   }
 
   /**

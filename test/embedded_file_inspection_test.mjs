@@ -512,3 +512,126 @@ test("read-only PDF/A document graph evidence", async () => {
     await task.destroy();
   }
 });
+
+test("PDF/A embedded file rules distinguish general associations from catalog-only invoice links", async () => {
+  const stream = (data, keys) =>
+    `<< ${keys} /Length ${data.length} >>\nstream\n${data}\nendstream`;
+  const annotation =
+    "<< /Type /Annot /Subtype /FileAttachment /Rect [0 0 0 0] /F 4 /FS 4 0 R /AF [4 0 R] >>";
+  const annotationLink = {
+    missingAF: true,
+    pageExtras: "/Annots [8 0 R]",
+    documentObjects: [[8, annotation]],
+  };
+  const xobject = stream(
+    "",
+    "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /AF [4 0 R]"
+  );
+  const scenarios = [
+    [
+      {},
+      [
+        ["PDF-EMBEDDED-FILE", "pass"],
+        ["6.8-1", "pass"],
+        ["6.8-2", "pass"],
+        ["6.8-3", "pass"],
+        ["6.8-4", "pass"],
+      ],
+    ],
+    [{ missingAF: true, pageExtras: "/AF [4 0 R]" }, [["6.8-4", "pass"]]],
+    [annotationLink, [["6.8-4", "pass"]]],
+    [
+      {
+        ...annotationLink,
+        documentObjects: [[8, annotation.replace(" /AF [4 0 R]", "")]],
+      },
+      [["6.8-4", "fail"]],
+    ],
+    [
+      {
+        missingAF: true,
+        documentObjects: [
+          [
+            3,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << /XObject << /Form 8 0 R >> >> >>",
+          ],
+          [8, xobject],
+        ],
+      },
+      [["6.8-4", "pass"]],
+    ],
+    [
+      {
+        missingAF: true,
+        catalogExtras: "/StructTreeRoot 8 0 R",
+        documentObjects: [
+          [8, "<< /Type /StructTreeRoot /K 9 0 R >>"],
+          [9, "<< /Type /StructElem /S /P /P 8 0 R /AF [4 0 R] >>"],
+        ],
+      },
+      [["6.8-4", "pass"]],
+    ],
+    [
+      {
+        missingAF: true,
+        pageExtras: "/Contents 8 0 R",
+        documentObjects: [[8, stream("/Span << /AF [4 0 R] >> BDC EMC", "")]],
+      },
+      [["6.8-4", "unknown"]],
+    ],
+    [{ missingAF: true }, [["6.8-4", "fail"]]],
+    [{ wrongRelationship: true }, [["6.8-3", "fail"]]],
+    [
+      { documentObjects: [[5, stream(XML, "/Subtype (application/xml)")]] },
+      [["6.8-1", "fail"]],
+    ],
+    [
+      { documentObjects: [[5, stream(XML, "/Subtype /text#2fplain")]] },
+      [
+        ["6.8-1", "pass"],
+        ["PDF-EMBEDDED-FILE", "pass"],
+      ],
+    ],
+    [{ recovery: true }, [["6.8-4", "unknown"]]],
+  ];
+  for (const [options, expected] of scenarios) {
+    const task = getDocument({
+      data: fixture(options),
+      isEvalSupported: false,
+    });
+    try {
+      const doc = await task.promise;
+      const { embeddedFiles } = await doc.getPdfAFileInspection();
+      for (const [id, status] of expected) {
+        const check = embeddedFiles.checks.find(item => item.id === id);
+        assert.equal(check?.status, status, JSON.stringify({ options, check }));
+      }
+      assert.doesNotMatch(JSON.stringify(embeddedFiles), /11804\.80/);
+    } finally {
+      await task.destroy();
+    }
+  }
+});
+
+test("XMP-only inspection keeps original bytes and skips a malformed name tree", async () => {
+  const task = getDocument({
+    data: fixture({ compressed: true, cycle: true }),
+    isEvalSupported: false,
+  });
+  try {
+    const doc = await task.promise;
+    const xmpOnly = await doc.getEmbeddedFileInspection({ metadataOnly: true });
+    const full = await doc.getEmbeddedFileInspection();
+    assert.deepEqual(xmpOnly.metadata, full.metadata);
+    assert.deepEqual(xmpOnly.files, []);
+    assert.equal(xmpOnly.nameTreePresent, false);
+    assert.deepEqual(xmpOnly.nameTreeEntries, []);
+    assert.equal(xmpOnly.associatedFiles, null);
+    assert.deepEqual(xmpOnly.issues, []);
+    assert.ok(
+      full.issues.some(issue => issue.code === "repeated-name-tree-node")
+    );
+  } finally {
+    await task.destroy();
+  }
+});

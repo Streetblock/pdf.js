@@ -68,6 +68,7 @@ import { Catalog } from "./catalog.js";
 import { clearGlobalCaches } from "./cleanup_helper.js";
 import { DatasetReader } from "./dataset_reader.js";
 import { inspectPdfADocument } from "./pdfa_document_inspection.js";
+import { inspectPdfAEmbeddedFiles } from "./pdfa_embedded_file_inspection.js";
 import { inspectPdfAXRef } from "./pdfa_xref_inspection.js";
 import { Intersector } from "./intersector.js";
 import { Linearization } from "./parser.js";
@@ -1174,8 +1175,16 @@ class PDFDocument {
     const trusted =
       !recoveryMode && xrefSectionsComplete && trailer instanceof Dict;
     const document = inspectPdfADocument(this.xref, trusted);
+    const embeddedFiles = inspectPdfAEmbeddedFiles(this.xref, trusted);
     if (!trusted) {
-      return { version: 1, parser, trailer: null, xref, document };
+      return {
+        version: 1,
+        parser,
+        trailer: null,
+        xref,
+        document,
+        embeddedFiles,
+      };
     }
 
     const value = trailer.getRaw("ID");
@@ -1204,6 +1213,7 @@ class PDFDocument {
       trailer: { id, hasEncrypt: trailer.has("Encrypt") },
       xref,
       document,
+      embeddedFiles,
     };
   }
 
