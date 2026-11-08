@@ -29,6 +29,7 @@ import { FlateStream } from "./flate_stream.js";
 import { MissingDataException } from "./core_utils.js";
 import { readFlate } from "./pdfa_xref_inspection.js";
 import { Stream } from "./stream.js";
+import { TransparencyInspection } from "./pdfa_transparency_inspection.js";
 
 const INTENT = "PDF-OUTPUT-INTENT",
   ICC = "PDF-ICC-STRUCTURE";
@@ -72,6 +73,7 @@ const PAINT = [
 ];
 const RULES = [INTENT, OUTPUT, SHARED, EXTERNAL, ...PAINT];
 const UNKNOWN = Symbol("unknown");
+const OPAQUE = { blend: false, fillAlpha: 1, strokeAlpha: 1, mask: false };
 const RANK = { "not-applicable": 0, pass: 1, unknown: 2, fail: 3 };
 const MAX_DEPTH = 32,
   MAX_ITEMS = 8192,
@@ -164,6 +166,8 @@ class ColorInspection {
     this.resourceNodes = new Set();
     this.forms = new Set();
     this.output = null;
+    this.pageUse = null;
+    this.transparency = new TransparencyInspection(this, UNKNOWN);
   }
 
   note(id, status, location, detail) {
@@ -185,6 +189,22 @@ class ColorInspection {
     for (const id of ids) {
       this.note(id, "unknown", path, detail);
     }
+  }
+
+  useTransparency(evidence) {
+    if (
+      this.pageUse &&
+      this.pageUse.transparent !== true &&
+      evidence !== false
+    ) {
+      this.pageUse.transparent = evidence;
+    }
+  }
+
+  unavailable(path, detail) {
+    this.unknown(path, detail);
+    this.transparency.unknown(path, detail, !this.pageUse);
+    this.useTransparency(UNKNOWN);
   }
 
   take(path, depth) {
@@ -494,7 +514,7 @@ class ColorInspection {
         return { device: DEVICES.get(space.name), resources };
       }
       if (space.name === "Pattern") {
-        return UNKNOWN;
+        return { pattern: true };
       }
       const next = this.resource(resources, "ColorSpace", space.name);
       return absent(next)
@@ -505,6 +525,9 @@ class ColorInspection {
       return UNKNOWN;
     }
     const type = space[0].name;
+    if (type === "Pattern") {
+      return { pattern: true };
+    }
     if (type === "ICCBased") {
       const stream = this.resolve(space[1]);
       const info = await this.profile(stream, path, "input");
@@ -582,6 +605,10 @@ class ColorInspection {
   }
 
   async paint(space, path) {
+    if (space?.pattern) {
+      this.unavailable(path, "Pattern content is outside this inspection.");
+      return;
+    }
     if (space === UNKNOWN || !space) {
       this.unknown(
         path,
@@ -623,23 +650,78 @@ class ColorInspection {
     }
   }
 
+  async composite(state, kind, path, depth, ownMask = false) {
+    const alpha = state[kind === "fill" ? "fillAlpha" : "strokeAlpha"];
+    const mask = ownMask ? false : state.mask;
+    const activeMask = !!mask && mask !== UNKNOWN;
+    if (
+      state.blend === true ||
+      (typeof alpha === "number" && alpha < 1) ||
+      activeMask
+    ) {
+      this.useTransparency(true);
+    } else if (
+      state.blend === UNKNOWN ||
+      alpha === UNKNOWN ||
+      mask === UNKNOWN
+    ) {
+      this.useTransparency(UNKNOWN);
+    }
+    if (!activeMask) {
+      return;
+    }
+    if (this.forms.has(mask.stream)) {
+      this.unavailable(path, "A soft-mask Form has a cyclic reference.");
+      return;
+    }
+    if (!this.pageUse.masks.has(mask)) {
+      this.pageUse.masks.add(mask);
+      await this.xobject(
+        mask.stream,
+        mask.sourceState.pageResources,
+        mask.sourceState,
+        at(path, "SMask"),
+        depth + 1
+      );
+    }
+  }
+
+  async paintObject(state, kind, path, depth) {
+    await this.composite(state, kind, path, depth);
+    if (!state.ignoreColors || state[kind]?.pattern) {
+      await this.paint(state[kind], path);
+    }
+  }
+
   async xobject(raw, resources, state, path, depth) {
     const obj = this.resolve(raw);
     if (!(obj instanceof BaseStream)) {
-      this.unknown(path, "The invoked XObject could not be inspected.");
+      this.unavailable(path, "The invoked XObject could not be inspected.");
       return;
     }
     const type = this.get(obj.dict, "Subtype");
     if (isName(type, "Image")) {
       const mask = this.get(obj.dict, "ImageMask");
-      if (!absent(this.get(obj.dict, "SMask")) || mask === UNKNOWN) {
-        this.unknown(
-          path,
-          "Image mask or transparency is outside this inspection."
-        );
-      } else if (mask === true) {
+      const ownMask = await this.transparency.image(obj.dict, resources, path);
+      const hardMask = this.get(obj.dict, "Mask");
+      this.useTransparency(ownMask);
+      if (hardMask === UNKNOWN) {
+        this.useTransparency(UNKNOWN);
+      }
+      const overrides =
+        ownMask !== false ||
+        hardMask === UNKNOWN ||
+        hardMask instanceof BaseStream ||
+        Array.isArray(hardMask);
+      await this.composite(state, "fill", path, depth, overrides);
+      if (mask === UNKNOWN) {
+        this.unknown(path, "The image stencil setting could not be read.");
+      } else if (
+        mask === true &&
+        (!state.ignoreColors || state.fill?.pattern)
+      ) {
         await this.paint(state.fill, path);
-      } else {
+      } else if (mask !== true && !state.ignoreColors) {
         await this.paint(
           await this.color(this.get(obj.dict, "ColorSpace"), resources, path),
           path
@@ -649,28 +731,43 @@ class ColorInspection {
     }
     if (
       !isName(type, "Form") ||
-      !absent(this.get(obj.dict, "Group")) ||
       !absent(this.get(obj.dict, "Ref")) ||
       this.forms.has(obj) ||
       !this.take(path, depth)
     ) {
-      this.unknown(
+      this.unavailable(
         path,
-        "The invoked Form is cyclic, transparent, external or unsupported."
+        "The invoked Form is cyclic, external or unsupported."
       );
       return;
     }
     const entry = this.get(obj.dict, "Resources");
     const local = absent(entry) ? state.pageResources : entry;
     await this.resources(local, at(path, "Resources"));
-    const bytes = await this.bytes(obj);
-    if (!bytes) {
-      this.unknown(path, "Form content could not be read.");
-      return;
-    }
     this.forms.add(obj);
     try {
-      await this.content(bytes, local, { ...state }, path, depth);
+      let kind = "form";
+      if (state.maskSubtype === "Alpha") {
+        kind = "alpha-mask";
+      } else if (state.maskSubtype === "Luminosity") {
+        kind = "luminosity-mask";
+      }
+      const group = await this.transparency.group(obj.dict, local, path, kind);
+      const child = { ...state, maskSubtype: null };
+      if (group.status !== "absent") {
+        this.useTransparency(group.status === "pass" ? true : UNKNOWN);
+        await this.composite(state, "fill", path, depth);
+        Object.assign(child, OPAQUE);
+        if (group.hasColor === true && !state.ignoreColors) {
+          await this.paint(group.color, at(path, "Group/CS"));
+        }
+      }
+      const bytes = await this.bytes(obj);
+      if (bytes) {
+        await this.content(bytes, local, child, path, depth);
+      } else {
+        this.unavailable(path, "Form content could not be read.");
+      }
     } finally {
       this.forms.delete(obj);
     }
@@ -694,7 +791,7 @@ class ColorInspection {
           this.ops-- <= 0 ||
           (parser.buf1 instanceof Cmd && parser.buf1.cmd === "BI")
         ) {
-          this.unknown(
+          this.unavailable(
             path,
             "Inline images or the operation limit prevent complete inspection."
           );
@@ -744,10 +841,10 @@ class ColorInspection {
           hasPath = true;
         } else if (op === "n" || FILL.has(op) || STROKE.has(op)) {
           if (hasPath && FILL.has(op)) {
-            await this.paint(state.fill, location);
+            await this.paintObject(state, "fill", location, depth);
           }
           if (hasPath && STROKE.has(op)) {
-            await this.paint(state.stroke, location);
+            await this.paintObject(state, "stroke", location, depth);
           }
           hasPath = false;
         } else if (op === "Do") {
@@ -757,7 +854,8 @@ class ColorInspection {
               : UNKNOWN;
           await this.xobject(obj, resources, state, location, depth + 1);
         } else if (op === "sh") {
-          this.unknown(location, "Shading is outside this color inspection.");
+          await this.composite(state, "fill", location, depth);
+          this.unknown(location, "Shading colors are outside this inspection.");
         } else if (op === "BT" || op === "ET") {
           if (inText === (op === "BT")) {
             throw new Error("Invalid text boundary");
@@ -779,25 +877,40 @@ class ColorInspection {
               ? this.resource(resources, "ExtGState", args[0].name)
               : UNKNOWN;
           if (!(gs instanceof Dict)) {
-            state.font = UNKNOWN;
-            this.unknown(
+            Object.assign(state, {
+              font: UNKNOWN,
+              blend: UNKNOWN,
+              fillAlpha: UNKNOWN,
+              strokeAlpha: UNKNOWN,
+              mask: UNKNOWN,
+            });
+            this.unavailable(
               location,
               "The graphics state could not be inspected."
             );
           } else {
-            const font = this.get(gs, "Font"),
-              mask = this.get(gs, "SMask");
+            const font = this.get(gs, "Font");
             if (!absent(font)) {
               state.font = Array.isArray(font)
                 ? this.resolve(font[0])
                 : UNKNOWN;
             }
-            if (!absent(mask) && !isName(mask, "None")) {
-              this.unknown(
-                location,
-                "Soft-mask colors are outside this inspection."
-              );
+            const delta = await this.transparency.graphicsState(
+              gs,
+              state.pageResources,
+              location
+            );
+            const mask = delta.mask;
+            if (mask && mask !== UNKNOWN) {
+              // The mask source is evaluated with the graphics state at gs.
+              mask.sourceState = {
+                ...state,
+                ...OPAQUE,
+                maskSubtype: mask.subtype,
+                ignoreColors: mask.subtype === "Alpha",
+              };
             }
+            Object.assign(state, delta);
           }
         } else if (TEXT.has(op)) {
           const shown = args.at(-1);
@@ -825,17 +938,17 @@ class ColorInspection {
               !(this.get(font, "Subtype") instanceof Name) ||
               isName(this.get(font, "Subtype"), "Type3")
             ) {
-              this.unknown(
+              this.unavailable(
                 location,
-                "The text rendering mode or Type 3 color use is outside this inspection."
+                "The text rendering mode or Type 3 graphics are outside this inspection."
               );
             } else {
               const base = state.mode % 4;
               if (base === 0 || base === 2) {
-                await this.paint(state.fill, location);
+                await this.paintObject(state, "fill", location, depth);
               }
               if (base === 1 || base === 2) {
-                await this.paint(state.stroke, location);
+                await this.paintObject(state, "stroke", location, depth);
               }
             }
           }
@@ -843,7 +956,7 @@ class ColorInspection {
         args.length = 0;
       }
       if (args.length || inText || stack.length) {
-        this.unknown(
+        this.unavailable(
           path,
           "The content stream ended in an incomplete graphics state."
         );
@@ -852,20 +965,25 @@ class ColorInspection {
       if (error instanceof MissingDataException) {
         throw error;
       }
-      this.unknown(
+      this.unavailable(
         path,
-        "Unsupported or malformed content prevented complete color inspection."
+        "Unsupported or malformed content prevented complete graphics inspection."
       );
     }
   }
 
   async page(raw, inherited, path, depth) {
     if (!this.take(path, depth)) {
+      this.transparency.unknown(
+        path,
+        "The page traversal reached its limit.",
+        true
+      );
       return;
     }
     const node = this.resolve(raw);
     if (!(node instanceof Dict) || this.pageNodes.has(node)) {
-      this.unknown(path, "The page tree could not be fully inspected.");
+      this.unavailable(path, "The page tree could not be fully inspected.");
       return;
     }
     this.pageNodes.add(node);
@@ -875,7 +993,10 @@ class ColorInspection {
     if (isName(type, "Pages")) {
       const kids = this.get(node, "Kids");
       if (!Array.isArray(kids) || kids.length > MAX_ITEMS) {
-        this.unknown(path, "The page-tree children could not be inspected.");
+        this.unavailable(
+          path,
+          "The page-tree children could not be inspected."
+        );
         return;
       }
       for (let i = 0; i < kids.length; i++) {
@@ -889,10 +1010,37 @@ class ColorInspection {
       return;
     }
     if (!isName(type, "Page")) {
-      this.unknown(path, "A page dictionary could not be resolved.");
+      this.unavailable(path, "A page dictionary could not be resolved.");
       return;
     }
     this.counts.pages++;
+    this.pageUse = {
+      transparent: false,
+      masks: new Set(),
+    };
+    try {
+      const group = await this.transparency.group(
+        node,
+        resources,
+        path,
+        "page"
+      );
+      if (group.hasColor === true) {
+        await this.paint(group.color, at(path, "Group/CS"));
+      }
+      await this.pageContents(node, resources, path, depth);
+      this.transparency.page(
+        group,
+        this.pageUse.transparent,
+        this.output,
+        path
+      );
+    } finally {
+      this.pageUse = null;
+    }
+  }
+
+  async pageContents(node, resources, path, depth) {
     await this.resources(resources, at(path, "Resources"));
     const annotations = this.get(node, "Annots");
     if (
@@ -904,21 +1052,15 @@ class ColorInspection {
           return (
             !(annotation instanceof Dict) ||
             !absent(this.get(annotation, "AP")) ||
+            !absent(this.get(annotation, "CA")) ||
             !absent(this.get(annotation, "C"))
           );
         }))
     ) {
-      this.unknown(
+      this.unavailable(
         at(path, "Annots"),
-        "Annotation appearance colors are outside this inspection."
+        "Annotation appearances are outside this inspection."
       );
-    }
-    if (!absent(this.get(node, "Group"))) {
-      this.unknown(
-        at(path, "Group"),
-        "Page transparency groups are outside this inspection."
-      );
-      return;
     }
     const contents = this.get(node, "Contents");
     if (absent(contents)) {
@@ -926,7 +1068,7 @@ class ColorInspection {
     }
     const streams = Array.isArray(contents) ? contents : [contents];
     if (streams.length > MAX_ITEMS) {
-      this.unknown(path, "The page contains too many content streams.");
+      this.unavailable(path, "The page contains too many content streams.");
       return;
     }
     const parts = [];
@@ -934,7 +1076,7 @@ class ColorInspection {
     for (const stream of streams) {
       const bytes = await this.bytes(this.resolve(stream));
       if (!bytes || (length += bytes.length) > MAX_BYTES) {
-        this.unknown(path, "The complete page content could not be read.");
+        this.unavailable(path, "The complete page content could not be read.");
         return;
       }
       parts.push(bytes);
@@ -952,6 +1094,7 @@ class ColorInspection {
       combined,
       resources,
       {
+        ...OPAQUE,
         fill: gray,
         stroke: gray,
         mode: 0,
@@ -979,7 +1122,7 @@ class ColorInspection {
   }
 }
 
-async function inspectPdfAColors(xref, trusted) {
+async function inspectPdfAGraphics(xref, trusted) {
   const inspection = new ColorInspection(xref);
   const catalog =
     trusted && !xref.encrypt ? inspection.get(xref.trailer, "Root") : null;
@@ -989,11 +1132,19 @@ async function inspectPdfAColors(xref, trusted) {
       "The original document color objects could not be established.",
       RULES
     );
+    inspection.transparency.unknown(
+      "/Root",
+      "The original transparency objects could not be established.",
+      true
+    );
   } else {
     await inspection.intents(catalog);
     await inspection.page(catalog.getRaw("Pages"), null, "/Root/Pages", 0);
   }
-  return inspection.finish();
+  return {
+    colors: inspection.finish(),
+    transparency: inspection.transparency.finish(),
+  };
 }
 
-export { inspectPdfAColors };
+export { inspectPdfAGraphics };
