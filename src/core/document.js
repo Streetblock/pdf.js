@@ -67,6 +67,7 @@ import { calculateMD5 } from "./calculate_md5.js";
 import { Catalog } from "./catalog.js";
 import { clearGlobalCaches } from "./cleanup_helper.js";
 import { DatasetReader } from "./dataset_reader.js";
+import { inspectPdfAColors } from "./pdfa_color_inspection.js";
 import { inspectPdfADocument } from "./pdfa_document_inspection.js";
 import { inspectPdfAEmbeddedFiles } from "./pdfa_embedded_file_inspection.js";
 import { inspectPdfAFonts } from "./pdfa_font_inspection.js";
@@ -1178,6 +1179,7 @@ class PDFDocument {
     const document = inspectPdfADocument(this.xref, trusted);
     const embeddedFiles = inspectPdfAEmbeddedFiles(this.xref, trusted);
     const fonts = await inspectPdfAFonts(this.xref, trusted);
+    const colors = await inspectPdfAColors(this.xref, trusted);
     if (!trusted) {
       return {
         version: 1,
@@ -1187,6 +1189,7 @@ class PDFDocument {
         document,
         embeddedFiles,
         fonts,
+        colors,
       };
     }
 
@@ -1218,6 +1221,7 @@ class PDFDocument {
       document,
       embeddedFiles,
       fonts,
+      colors,
     };
   }
 
