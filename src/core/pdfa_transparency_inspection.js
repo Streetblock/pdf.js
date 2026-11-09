@@ -15,6 +15,8 @@
 
 import { Dict, isName, Name } from "./primitives.js";
 import { BaseStream } from "./base_stream.js";
+import { FlateStream } from "./flate_stream.js";
+import { Stream } from "./stream.js";
 
 const BLEND = "6.2.10-1";
 const PAGE = "6.2.10-2";
@@ -378,7 +380,7 @@ class TransparencyInspection {
     }
 
     const { host } = this;
-    this.transfer(host.get(mask, "TR"), path + "/TR");
+    await this.transfer(host.get(mask, "TR"), path + "/TR");
     const type = host.get(mask, "Type");
     const subtype = host.get(mask, "S");
     const stream = host.get(mask, "G");
@@ -495,13 +497,13 @@ class TransparencyInspection {
       status,
       path + "/" + key,
       status === "pass"
-        ? "The Type 2 function parameter has the required numeric dimensions."
-        : "The Type 2 function parameter has invalid dimensions, nonnumeric values or unresolved references."
+        ? "The transfer function parameter has the required numeric dimensions."
+        : "The transfer function parameter has invalid dimensions, nonnumeric values or unresolved references."
     );
     return status === "pass" ? values : null;
   }
 
-  transfer(value, path) {
+  async transfer(value, path) {
     if (absent(value) || isName(value, "Identity")) {
       this.note(
         MASK,
@@ -522,8 +524,12 @@ class TransparencyInspection {
       return;
     }
     const type = this.host.get(dict, "FunctionType");
+    if (type === 0) {
+      await this.sampledTransfer(value, dict, path);
+      return;
+    }
     if (type !== 2) {
-      const supported = [0, 3, 4].includes(type);
+      const supported = [3, 4].includes(type);
       this.note(
         MASK,
         supported || type === this.unresolved ? "unknown" : "fail",
@@ -580,6 +586,132 @@ class TransparencyInspection {
         "A fractional exponent requires nonnegative inputs and a negative exponent requires a domain excluding zero."
       );
     }
+  }
+
+  async sampledTransfer(stream, dict, path) {
+    if (!(stream instanceof BaseStream)) {
+      this.note(
+        MASK,
+        "fail",
+        path,
+        "A Type 0 transfer function requires a sample data stream."
+      );
+      return;
+    }
+    for (const key of ["Domain", "Range"]) {
+      const interval = this.functionArray(dict, key, 2, null, path);
+      if (interval && interval[0] > interval[1]) {
+        this.note(
+          MASK,
+          "fail",
+          path + "/" + key,
+          "The sampled function interval is reversed."
+        );
+      }
+    }
+    const size = this.functionArray(dict, "Size", 1, null, path);
+    if (size) {
+      this.note(
+        MASK,
+        Number.isInteger(size[0]) && size[0] > 0 ? "pass" : "fail",
+        path + "/Size",
+        "The sample count must be a positive integer."
+      );
+    }
+    const bits = this.host.get(dict, "BitsPerSample");
+    const validBits = [1, 2, 4, 8, 12, 16, 24, 32].includes(bits);
+    this.note(
+      MASK,
+      this.status(bits, validBits),
+      path + "/BitsPerSample",
+      validBits
+        ? "The sample bit depth is allowed for a Type 0 function."
+        : "The sample bit depth is missing, unsupported or unresolved."
+    );
+    const declaredOrder = this.host.get(dict, "Order");
+    const order = absent(declaredOrder) ? 1 : declaredOrder;
+    this.note(
+      MASK,
+      this.status(order, order === 1 || order === 3),
+      path + "/Order",
+      "The interpolation order must be 1 or 3."
+    );
+    for (const key of ["Encode", "Decode"]) {
+      if (!absent(this.host.get(dict, key))) {
+        this.functionArray(dict, key, 2, null, path);
+      }
+    }
+    if (!size || !Number.isInteger(size[0]) || size[0] <= 0 || !validBits) {
+      return;
+    }
+    if (!Number.isSafeInteger(size[0])) {
+      this.note(
+        MASK,
+        "unknown",
+        path + "/Size",
+        "The declared sample count exceeds exact integer inspection."
+      );
+      return;
+    }
+    const bytes = await this.sampleBytes(stream);
+    if (!bytes) {
+      this.note(
+        MASK,
+        "unknown",
+        path,
+        "The original sample data could not be decoded within the supported filters and byte budget."
+      );
+      return;
+    }
+    const required = (BigInt(size[0]) * BigInt(bits) + 7n) / 8n;
+    this.note(
+      MASK,
+      BigInt(bytes.length) >= required ? "pass" : "fail",
+      path,
+      "The sampled function requires at least " +
+        required +
+        " decoded sample bytes."
+    );
+  }
+
+  async sampleBytes(stream) {
+    const { host } = this;
+    const dict = stream.dict;
+    const filter = host.get(dict, "Filter");
+    let filters = [];
+    if (!absent(filter)) {
+      filters = Array.isArray(filter) ? filter : [filter];
+    }
+    // PDF.js can ignore unsupported filters. Check original declarations and
+    // decoder classes before treating any bytes as decoded samples.
+    if (!absent(host.get(dict, "DP")) || filters.length > 1) {
+      return null;
+    }
+    if (!filters.length) {
+      return stream instanceof Stream ? host.bytes(stream) : null;
+    }
+    const name = host.resolve(filters[0]);
+    if (
+      (!isName(name, "FlateDecode") && !isName(name, "Fl")) ||
+      !(stream instanceof FlateStream)
+    ) {
+      return null;
+    }
+    let parameters = host.get(dict, "DecodeParms");
+    if (Array.isArray(parameters)) {
+      parameters =
+        parameters.length === 1 ? host.resolve(parameters[0]) : this.unresolved;
+    }
+    if (!absent(parameters)) {
+      if (!(parameters instanceof Dict)) {
+        return null;
+      }
+      const predictor = host.get(parameters, "Predictor");
+      if (!absent(predictor) && predictor !== 1) {
+        return null;
+      }
+    }
+    return host.bytes(stream);
   }
 
   async image(dict, resources, path) {
