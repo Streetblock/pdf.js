@@ -67,6 +67,7 @@ class TransparencyInspection {
     this.states = new Set();
     this.masks = new Set();
     this.maskImages = new Set();
+    this.functionBudget = 8192;
     this.counts = {
       transparentPages: 0,
       annotationAppearances: 0,
@@ -503,8 +504,8 @@ class TransparencyInspection {
     return status === "pass" ? values : null;
   }
 
-  async transfer(value, path) {
-    if (absent(value) || isName(value, "Identity")) {
+  async transfer(value, path, ancestors = null) {
+    if (!ancestors && (absent(value) || isName(value, "Identity"))) {
       this.note(
         MASK,
         "pass",
@@ -519,7 +520,16 @@ class TransparencyInspection {
         MASK,
         this.status(value, false),
         path,
-        "The transfer must be /Identity or a readable function."
+        "A readable function dictionary is required at this location."
+      );
+      return;
+    }
+    if (this.functionBudget-- <= 0 || ancestors?.size >= 32) {
+      this.note(
+        MASK,
+        "unknown",
+        path,
+        "The transfer function inspection reached its visit or depth limit."
       );
       return;
     }
@@ -528,8 +538,27 @@ class TransparencyInspection {
       await this.sampledTransfer(value, dict, path);
       return;
     }
+    if (type === 3) {
+      const active = ancestors ?? new Set();
+      if (active.has(dict)) {
+        this.note(
+          MASK,
+          "unknown",
+          path,
+          "The stitching function has a cyclic reference."
+        );
+        return;
+      }
+      active.add(dict);
+      try {
+        await this.stitchingTransfer(dict, path, active);
+      } finally {
+        active.delete(dict);
+      }
+      return;
+    }
     if (type !== 2) {
-      const supported = [3, 4].includes(type);
+      const supported = type === 4;
       this.note(
         MASK,
         supported || type === this.unresolved ? "unknown" : "fail",
@@ -584,6 +613,92 @@ class TransparencyInspection {
         "fail",
         path + "/Domain",
         "A fractional exponent requires nonnegative inputs and a negative exponent requires a domain excluding zero."
+      );
+    }
+  }
+
+  async stitchingTransfer(dict, path, ancestors) {
+    const domain = this.functionArray(dict, "Domain", 2, null, path);
+    if (!absent(this.host.get(dict, "Range"))) {
+      const range = this.functionArray(dict, "Range", 2, null, path);
+      if (range && range[0] > range[1]) {
+        this.note(
+          MASK,
+          "fail",
+          path + "/Range",
+          "The stitching function range is reversed."
+        );
+      }
+    }
+    if (domain && domain[0] > domain[1]) {
+      this.note(
+        MASK,
+        "fail",
+        path + "/Domain",
+        "The stitching function domain is reversed."
+      );
+    }
+    const functions = this.host.get(dict, "Functions");
+    if (!Array.isArray(functions) || !functions.length) {
+      this.note(
+        MASK,
+        this.status(functions, false),
+        path + "/Functions",
+        "A stitching function requires a nonempty array of scalar functions."
+      );
+      return;
+    }
+    if (functions.length > 512) {
+      this.note(
+        MASK,
+        "unknown",
+        path + "/Functions",
+        "The function array exceeds the inspection limit."
+      );
+      return;
+    }
+    const count = functions.length;
+    const bounds = this.functionArray(dict, "Bounds", count - 1, null, path);
+    this.functionArray(dict, "Encode", count * 2, null, path);
+    if (domain && count > 1 && domain[0] === domain[1]) {
+      this.note(
+        MASK,
+        "fail",
+        path + "/Domain",
+        "A multi-part stitching function requires a nonzero domain interval."
+      );
+    }
+    if (bounds) {
+      let previous = domain?.[0];
+      for (const boundary of bounds) {
+        if (
+          (previous !== undefined && boundary <= previous) ||
+          (domain && boundary > domain[1])
+        ) {
+          this.note(
+            MASK,
+            "fail",
+            path + "/Bounds",
+            "Bounds must increase strictly above the domain's lower endpoint and not exceed its upper endpoint."
+          );
+        }
+        previous = boundary;
+      }
+    }
+    for (let i = 0; i < count; i++) {
+      if (this.functionBudget <= 0) {
+        this.note(
+          MASK,
+          "unknown",
+          path + "/Functions",
+          "The function inspection reached its visit limit."
+        );
+        break;
+      }
+      await this.transfer(
+        this.host.resolve(functions[i]),
+        path + "/Functions[" + i + "]",
+        ancestors
       );
     }
   }
