@@ -16,6 +16,7 @@
 import { Dict, isName, Name } from "./primitives.js";
 import { BaseStream } from "./base_stream.js";
 import { FlateStream } from "./flate_stream.js";
+import { inspectCalculator } from "./pdfa_calculator_inspection.js";
 import { Stream } from "./stream.js";
 
 const BLEND = "6.2.10-1";
@@ -538,6 +539,10 @@ class TransparencyInspection {
       await this.sampledTransfer(value, dict, path);
       return;
     }
+    if (type === 4) {
+      await this.calculatorTransfer(value, dict, path);
+      return;
+    }
     if (type === 3) {
       const active = ancestors ?? new Set();
       if (active.has(dict)) {
@@ -558,14 +563,11 @@ class TransparencyInspection {
       return;
     }
     if (type !== 2) {
-      const supported = type === 4;
       this.note(
         MASK,
-        supported || type === this.unresolved ? "unknown" : "fail",
+        this.status(type, false),
         path + "/FunctionType",
-        supported
-          ? "This soft-mask transfer function type is outside the current inspection."
-          : "The function type is missing, invalid or could not be resolved."
+        "The function type is missing, invalid or could not be resolved."
       );
       return;
     }
@@ -703,6 +705,44 @@ class TransparencyInspection {
     }
   }
 
+  async calculatorTransfer(stream, dict, path) {
+    if (!(stream instanceof BaseStream)) {
+      this.note(
+        MASK,
+        "fail",
+        path,
+        "A Type 4 calculator function requires a code stream."
+      );
+      return;
+    }
+    let domain = null;
+    for (const key of ["Domain", "Range"]) {
+      const interval = this.functionArray(dict, key, 2, null, path);
+      if (interval && interval[0] > interval[1]) {
+        this.note(
+          MASK,
+          "fail",
+          path + "/" + key,
+          "The calculator function interval is reversed."
+        );
+      } else if (key === "Domain") {
+        domain = interval;
+      }
+    }
+    const bytes = await this.functionBytes(stream);
+    if (!bytes) {
+      this.note(
+        MASK,
+        "unknown",
+        path,
+        "The original calculator code could not be decoded within the supported filters and byte budget."
+      );
+      return;
+    }
+    const result = inspectCalculator(bytes, domain);
+    this.note(MASK, result.status, path, result.detail);
+  }
+
   async sampledTransfer(stream, dict, path) {
     if (!(stream instanceof BaseStream)) {
       this.note(
@@ -768,7 +808,7 @@ class TransparencyInspection {
       );
       return;
     }
-    const bytes = await this.sampleBytes(stream);
+    const bytes = await this.functionBytes(stream);
     if (!bytes) {
       this.note(
         MASK,
@@ -789,7 +829,7 @@ class TransparencyInspection {
     );
   }
 
-  async sampleBytes(stream) {
+  async functionBytes(stream) {
     const { host } = this;
     const dict = stream.dict;
     const filter = host.get(dict, "Filter");
@@ -798,7 +838,7 @@ class TransparencyInspection {
       filters = Array.isArray(filter) ? filter : [filter];
     }
     // PDF.js can ignore unsupported filters. Check original declarations and
-    // decoder classes before treating any bytes as decoded samples.
+    // decoder classes before treating any bytes as decoded function data.
     if (!absent(host.get(dict, "DP")) || filters.length > 1) {
       return null;
     }
