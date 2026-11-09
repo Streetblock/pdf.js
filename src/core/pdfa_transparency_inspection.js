@@ -378,6 +378,7 @@ class TransparencyInspection {
     }
 
     const { host } = this;
+    this.transfer(host.get(mask, "TR"), path + "/TR");
     const type = host.get(mask, "Type");
     const subtype = host.get(mask, "S");
     const stream = host.get(mask, "G");
@@ -441,56 +442,144 @@ class TransparencyInspection {
     }
 
     const backdrop = luminosity ? host.get(mask, "BC") : null;
-    const transfer = host.get(mask, "TR");
     const count = group.color?.components ?? group.color?.device?.components;
     const components =
       Array.isArray(backdrop) && backdrop.length <= 4
         ? backdrop.map(item => host.resolve(item))
         : null;
-    if (
-      components?.includes(unknown) ||
-      backdrop === unknown ||
-      transfer === unknown
-    ) {
+    if (components?.includes(unknown) || backdrop === unknown) {
       this.note(
         MASK,
         "unknown",
         path,
-        "The mask backdrop or transfer function could not be resolved."
+        "The mask backdrop could not be resolved."
       );
     } else if (
-      (!absent(backdrop) &&
-        (components?.length !== count ||
-          !components?.every(
-            value => Number.isFinite(value) && value >= 0 && value <= 1
-          ))) ||
-      (!absent(transfer) &&
-        !isName(transfer, "Identity") &&
-        !(transfer instanceof Dict) &&
-        !(transfer instanceof BaseStream))
+      !absent(backdrop) &&
+      (components?.length !== count ||
+        !components?.every(
+          value => Number.isFinite(value) && value >= 0 && value <= 1
+        ))
     ) {
-      this.note(
-        MASK,
-        "fail",
-        path,
-        "The mask backdrop or transfer function has an invalid shape."
-      );
-    } else if (transfer instanceof Dict || transfer instanceof BaseStream) {
-      this.note(
-        MASK,
-        "unknown",
-        path + "/TR",
-        "Soft-mask transfer functions are outside this inspection."
-      );
+      this.note(MASK, "fail", path, "The mask backdrop has an invalid shape.");
     } else {
       this.note(
         MASK,
         "pass",
         path,
-        "The soft-mask subtype, source group and declared parameters were checked."
+        "The soft-mask subtype, source group and backdrop were checked."
       );
     }
     return descriptor;
+  }
+
+  functionArray(dict, key, length, fallback, path) {
+    const raw = this.host.get(dict, key);
+    const value = absent(raw) && fallback ? fallback : raw;
+    let values = null;
+    let status = "fail";
+    if (value === this.unresolved) {
+      status = "unknown";
+    } else if (Array.isArray(value) && value.length === length) {
+      values = value.map(item => this.host.resolve(item));
+      if (
+        values.some(item => item !== this.unresolved && !Number.isFinite(item))
+      ) {
+        status = "fail";
+      } else {
+        status = values.includes(this.unresolved) ? "unknown" : "pass";
+      }
+    }
+    this.note(
+      MASK,
+      status,
+      path + "/" + key,
+      status === "pass"
+        ? "The Type 2 function parameter has the required numeric dimensions."
+        : "The Type 2 function parameter has invalid dimensions, nonnumeric values or unresolved references."
+    );
+    return status === "pass" ? values : null;
+  }
+
+  transfer(value, path) {
+    if (absent(value) || isName(value, "Identity")) {
+      this.note(
+        MASK,
+        "pass",
+        path,
+        "The soft mask uses the identity transfer."
+      );
+      return;
+    }
+    const dict = value instanceof BaseStream ? value.dict : value;
+    if (!(dict instanceof Dict)) {
+      this.note(
+        MASK,
+        this.status(value, false),
+        path,
+        "The transfer must be /Identity or a readable function."
+      );
+      return;
+    }
+    const type = this.host.get(dict, "FunctionType");
+    if (type !== 2) {
+      const supported = [0, 3, 4].includes(type);
+      this.note(
+        MASK,
+        supported || type === this.unresolved ? "unknown" : "fail",
+        path + "/FunctionType",
+        supported
+          ? "This soft-mask transfer function type is outside the current inspection."
+          : "The function type is missing, invalid or could not be resolved."
+      );
+      return;
+    }
+    const domain = this.functionArray(dict, "Domain", 2, null, path);
+    this.functionArray(dict, "C0", 1, [0], path);
+    this.functionArray(dict, "C1", 1, [1], path);
+    if (!absent(this.host.get(dict, "Range"))) {
+      const range = this.functionArray(dict, "Range", 2, null, path);
+      if (range && range[0] > range[1]) {
+        this.note(
+          MASK,
+          "fail",
+          path + "/Range",
+          "The function range is reversed."
+        );
+      }
+    }
+    const exponent = this.host.get(dict, "N");
+    this.note(
+      MASK,
+      this.status(exponent, Number.isFinite(exponent)),
+      path + "/N",
+      Number.isFinite(exponent)
+        ? "The Type 2 exponent is a finite number."
+        : "The Type 2 exponent is missing, nonnumeric or unresolved."
+    );
+    if (!domain) {
+      return;
+    }
+    const [lower, upper] = domain;
+    if (lower > upper) {
+      this.note(
+        MASK,
+        "fail",
+        path + "/Domain",
+        "The function domain is reversed."
+      );
+    } else if (
+      Number.isFinite(exponent) &&
+      ((!Number.isInteger(exponent) && lower < 0) ||
+        (exponent < 0 && lower <= 0 && upper >= 0))
+    ) {
+      this.note(
+        MASK,
+        "fail",
+        path + "/Domain",
+        "A fractional exponent requires nonnegative inputs and a negative exponent requires a domain excluding zero."
+      );
+    }
   }
 
   async image(dict, resources, path) {
