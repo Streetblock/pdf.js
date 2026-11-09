@@ -703,7 +703,12 @@ class ColorInspection {
     const type = this.get(obj.dict, "Subtype");
     if (isName(type, "Image")) {
       const mask = this.get(obj.dict, "ImageMask");
-      const ownMask = await this.transparency.image(obj.dict, resources, path);
+      const ownMask = await this.transparency.image(
+        obj.dict,
+        resources,
+        path,
+        obj
+      );
       const hardMask = this.get(obj.dict, "Mask");
       this.useTransparency(ownMask, path);
       if (hardMask === UNKNOWN) {

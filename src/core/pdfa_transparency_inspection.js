@@ -17,6 +17,8 @@ import { Dict, isName, Name } from "./primitives.js";
 import { BaseStream } from "./base_stream.js";
 import { FlateStream } from "./flate_stream.js";
 import { inspectCalculator } from "./pdfa_calculator_inspection.js";
+import { inspectJpxAlpha } from "./pdfa_jpx_inspection.js";
+import { JpxStream } from "./jpx_stream.js";
 import { Stream } from "./stream.js";
 
 const BLEND = "6.2.10-1";
@@ -24,7 +26,8 @@ const PAGE = "6.2.10-2";
 const GROUP = "PDF-TRANSPARENCY-GROUP";
 const MASK = "PDF-SOFT-MASK";
 const STATE = "PDF-TRANSPARENCY-STATE";
-const RULES = [BLEND, PAGE, GROUP, MASK, STATE];
+const JPX = "PDF-JPX-ALPHA";
+const RULES = [BLEND, PAGE, GROUP, MASK, STATE, JPX];
 const RANK = { "not-applicable": 0, pass: 1, unknown: 2, fail: 3 };
 const BLEND_MODES = new Set([
   "Normal",
@@ -69,6 +72,7 @@ class TransparencyInspection {
     this.masks = new Set();
     this.maskImages = new Set();
     this.functionBudget = 8192;
+    this.jpxResults = new Map();
     this.counts = {
       transparentPages: 0,
       annotationAppearances: 0,
@@ -76,6 +80,7 @@ class TransparencyInspection {
       graphicsStates: 0,
       softMasks: 0,
       imageSoftMasks: 0,
+      jpxAlphaStreams: 0,
     };
   }
 
@@ -869,61 +874,143 @@ class TransparencyInspection {
     return host.bytes(stream);
   }
 
-  async image(dict, resources, path) {
+  async embeddedAlpha(dict, source, path) {
+    const { host } = this;
+    const unknown = this.unresolved;
+    const mode = host.get(dict, "SMaskInData");
+    if (absent(mode)) {
+      return false;
+    }
+    const filter = host.get(dict, "Filter");
+    const filters = Array.isArray(filter) ? filter : [filter];
+    const resolved =
+      filters.length <= 16 ? filters.map(value => host.resolve(value)) : null;
+    const jpx = resolved?.some(
+      value => isName(value, "JPXDecode") || isName(value, "JPX")
+    );
+    if (!jpx) {
+      if (
+        source instanceof JpxStream ||
+        !resolved ||
+        resolved.includes(unknown)
+      ) {
+        this.note(
+          JPX,
+          "unknown",
+          path,
+          "The image filter could not be established."
+        );
+        return mode === 0 ? false : unknown;
+      }
+      return false;
+    }
+    const status = this.status(mode, mode === 0 || mode === 1 || mode === 2);
+    this.note(
+      MASK,
+      status,
+      path + "/SMaskInData",
+      "The embedded alpha mode must be 0, 1 or 2."
+    );
+    if (status !== "pass") {
+      this.note(
+        JPX,
+        status,
+        path + "/SMaskInData",
+        "The embedded alpha mode is invalid or unresolved."
+      );
+      return unknown;
+    }
+    if (mode === 0) {
+      this.note(
+        JPX,
+        "pass",
+        path + "/SMaskInData",
+        "Embedded alpha channels are explicitly ignored."
+      );
+      return false;
+    }
+    const mask = host.get(dict, "SMask");
+    if (!absent(mask)) {
+      this.note(
+        MASK,
+        this.status(mask, false),
+        path + "/SMask",
+        "JPX embedded alpha and a separate image soft mask are mutually exclusive."
+      );
+    }
+    if (!(source instanceof JpxStream)) {
+      this.note(
+        JPX,
+        "unknown",
+        path,
+        "The original JPX stream could not be inspected."
+      );
+      return unknown;
+    }
+    if (!this.jpxResults.has(source)) {
+      this.counts.jpxAlphaStreams++;
+      const bytes = await this.jpxBytes(source, resolved);
+      this.jpxResults.set(
+        source,
+        bytes
+          ? inspectJpxAlpha(bytes, mode)
+          : {
+              status: "unknown",
+              detail:
+                "Original JP2 bytes could not be read within the supported filter and byte limits.",
+              transparent: null,
+            }
+      );
+    }
+    const result = this.jpxResults.get(source);
+    this.note(JPX, result.status, path + "/SMaskInData", result.detail);
+    return result.transparent === null ? unknown : result.transparent;
+  }
+
+  async jpxBytes(source, filters) {
+    const { host } = this;
+    const dict = source.dict;
+    if (
+      !absent(host.get(dict, "F")) ||
+      !absent(host.get(dict, "DP")) ||
+      !filters.length ||
+      filters.length > 2 ||
+      !(isName(filters.at(-1), "JPXDecode") || isName(filters.at(-1), "JPX"))
+    ) {
+      return null;
+    }
+    const inner = source.stream;
+    if (filters.length === 1) {
+      return inner instanceof Stream ? host.bytes(inner) : null;
+    }
+    if (
+      !(isName(filters[0], "FlateDecode") || isName(filters[0], "Fl")) ||
+      !(inner instanceof FlateStream)
+    ) {
+      return null;
+    }
+    let parameters = host.get(dict, "DecodeParms");
+    if (Array.isArray(parameters)) {
+      parameters =
+        parameters.length <= 2 ? host.resolve(parameters[0]) : this.unresolved;
+    }
+    if (!absent(parameters)) {
+      if (!(parameters instanceof Dict)) {
+        return null;
+      }
+      const predictor = host.get(parameters, "Predictor");
+      if (!absent(predictor) && predictor !== 1) {
+        return null;
+      }
+    }
+    return host.bytes(inner);
+  }
+
+  async image(dict, resources, path, source = null) {
     const { host } = this;
     const unknown = this.unresolved;
     const mask = host.get(dict, "SMask");
-    const inData = host.get(dict, "SMaskInData");
-    let embedded = false;
-    if (!absent(inData)) {
-      const modeStatus = this.status(
-        inData,
-        inData === 0 || inData === 1 || inData === 2
-      );
-      if (modeStatus !== "pass") {
-        this.note(
-          MASK,
-          modeStatus,
-          path + "/SMaskInData",
-          "The embedded alpha mode must be 0, 1 or 2."
-        );
-        embedded = unknown;
-      } else if (inData !== 0) {
-        const filter = host.get(dict, "Filter");
-        const filters = Array.isArray(filter) ? filter : [filter];
-        const resolved =
-          filters.length <= 16
-            ? filters.map(value => host.resolve(value))
-            : null;
-        const jpx = resolved?.some(value => isName(value, "JPXDecode"));
-        if (jpx || !resolved || resolved.includes(unknown)) {
-          embedded = unknown;
-          if (jpx && !absent(mask) && mask !== unknown) {
-            this.note(
-              MASK,
-              "fail",
-              path + "/SMask",
-              "JPX embedded alpha and a separate image soft mask are mutually exclusive."
-            );
-          } else {
-            this.note(
-              MASK,
-              "unknown",
-              path + "/SMaskInData",
-              "Encoded alpha samples or the image filter could not be verified."
-            );
-          }
-        }
-      } else {
-        this.note(
-          MASK,
-          "pass",
-          path + "/SMaskInData",
-          "Encoded alpha samples are explicitly ignored."
-        );
-      }
-    }
-
+    const embedded = await this.embeddedAlpha(dict, source, path);
     if (absent(mask)) {
       return embedded;
     }
