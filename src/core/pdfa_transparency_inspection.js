@@ -18,6 +18,7 @@ import { BaseStream } from "./base_stream.js";
 import { FlateStream } from "./flate_stream.js";
 import { inspectCalculator } from "./pdfa_calculator_inspection.js";
 import { inspectJpxAlpha } from "./pdfa_jpx_inspection.js";
+import { inspectJpxCodestream } from "./pdfa_jpx_codestream_inspection.js";
 import { JpxStream } from "./jpx_stream.js";
 import { Stream } from "./stream.js";
 
@@ -27,7 +28,8 @@ const GROUP = "PDF-TRANSPARENCY-GROUP";
 const MASK = "PDF-SOFT-MASK";
 const STATE = "PDF-TRANSPARENCY-STATE";
 const JPX = "PDF-JPX-ALPHA";
-const RULES = [BLEND, PAGE, GROUP, MASK, STATE, JPX];
+const CODESTREAM = "PDF-JPX-CODESTREAM";
+const RULES = [BLEND, PAGE, GROUP, MASK, STATE, JPX, CODESTREAM];
 const RANK = { "not-applicable": 0, pass: 1, unknown: 2, fail: 3 };
 const BLEND_MODES = new Set([
   "Normal",
@@ -81,6 +83,9 @@ class TransparencyInspection {
       softMasks: 0,
       imageSoftMasks: 0,
       jpxAlphaStreams: 0,
+      jpxCodestreams: 0,
+      jpxHeaderSegments: 0,
+      jpxTileParts: 0,
     };
   }
 
@@ -874,6 +879,65 @@ class TransparencyInspection {
     return host.bytes(stream);
   }
 
+  jpxFilters(dict) {
+    const filter = this.host.get(dict, "Filter");
+    const filters = Array.isArray(filter) ? filter : [filter];
+    return filters.length <= 16
+      ? filters.map(value => this.host.resolve(value))
+      : null;
+  }
+
+  async jpxEvidence(source, filters) {
+    if (!this.jpxResults.has(source)) {
+      const bytes = await this.jpxBytes(source, filters);
+      this.jpxResults.set(source, { bytes });
+    }
+    return this.jpxResults.get(source);
+  }
+
+  async codestream(dict, source, path) {
+    const filters = this.jpxFilters(dict);
+    const declared = filters?.some(
+      value => isName(value, "JPXDecode") || isName(value, "JPX")
+    );
+    if (!declared && !(source instanceof JpxStream)) {
+      if (!filters || filters.includes(this.unresolved)) {
+        this.note(
+          CODESTREAM,
+          "unknown",
+          path,
+          "The image filters could not be established."
+        );
+      }
+      return;
+    }
+    if (!declared || !(source instanceof JpxStream)) {
+      this.note(
+        CODESTREAM,
+        "unknown",
+        path,
+        "The original JPX stream and its filter declaration could not be established."
+      );
+      return;
+    }
+    const evidence = await this.jpxEvidence(source, filters);
+    if (!evidence.codestream) {
+      this.counts.jpxCodestreams++;
+      evidence.codestream = evidence.bytes
+        ? inspectJpxCodestream(evidence.bytes)
+        : {
+            status: "unknown",
+            detail:
+              "Original JP2 bytes could not be read within the supported filter and byte limits.",
+          };
+      this.counts.jpxHeaderSegments +=
+        evidence.codestream.counts?.headerSegments || 0;
+      this.counts.jpxTileParts += evidence.codestream.counts?.tileParts || 0;
+    }
+    const result = evidence.codestream;
+    this.note(CODESTREAM, result.status, path + "/Codestream", result.detail);
+  }
+
   async embeddedAlpha(dict, source, path) {
     const { host } = this;
     const unknown = this.unresolved;
@@ -881,10 +945,7 @@ class TransparencyInspection {
     if (absent(mode)) {
       return false;
     }
-    const filter = host.get(dict, "Filter");
-    const filters = Array.isArray(filter) ? filter : [filter];
-    const resolved =
-      filters.length <= 16 ? filters.map(value => host.resolve(value)) : null;
+    const resolved = this.jpxFilters(dict);
     const jpx = resolved?.some(
       value => isName(value, "JPXDecode") || isName(value, "JPX")
     );
@@ -947,22 +1008,19 @@ class TransparencyInspection {
       );
       return unknown;
     }
-    if (!this.jpxResults.has(source)) {
+    const evidence = await this.jpxEvidence(source, resolved);
+    if (!evidence.alpha) {
       this.counts.jpxAlphaStreams++;
-      const bytes = await this.jpxBytes(source, resolved);
-      this.jpxResults.set(
-        source,
-        bytes
-          ? inspectJpxAlpha(bytes, mode)
-          : {
-              status: "unknown",
-              detail:
-                "Original JP2 bytes could not be read within the supported filter and byte limits.",
-              transparent: null,
-            }
-      );
+      evidence.alpha = evidence.bytes
+        ? inspectJpxAlpha(evidence.bytes, mode)
+        : {
+            status: "unknown",
+            detail:
+              "Original JP2 bytes could not be read within the supported filter and byte limits.",
+            transparent: null,
+          };
     }
-    const result = this.jpxResults.get(source);
+    const result = evidence.alpha;
     this.note(JPX, result.status, path + "/SMaskInData", result.detail);
     return result.transparent === null ? unknown : result.transparent;
   }
@@ -1010,6 +1068,18 @@ class TransparencyInspection {
     const { host } = this;
     const unknown = this.unresolved;
     const mask = host.get(dict, "SMask");
+    await this.codestream(dict, source, path);
+    const hardMask = host.get(dict, "Mask");
+    if (hardMask instanceof BaseStream) {
+      await this.codestream(hardMask.dict, hardMask, path + "/Mask");
+    } else if (hardMask === unknown) {
+      this.note(
+        CODESTREAM,
+        "unknown",
+        path + "/Mask",
+        "An image mask stream could not be resolved."
+      );
+    }
     const embedded = await this.embeddedAlpha(dict, source, path);
     if (absent(mask)) {
       return embedded;
@@ -1030,6 +1100,7 @@ class TransparencyInspection {
     }
 
     const m = mask.dict;
+    await this.codestream(m, mask, path);
     const type = host.get(m, "Type");
     const subtype = host.get(m, "Subtype");
     const imageMask = host.get(m, "ImageMask");

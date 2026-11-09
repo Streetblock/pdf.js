@@ -346,7 +346,7 @@ class Jp2HeaderInspection {
     return alphaType;
   }
 
-  inspect(mode) {
+  header() {
     const boxes = this.boxes(0, this.bytes.length);
     const signature = this.one(boxes, "jP  ");
     this.size(signature, 4);
@@ -390,6 +390,11 @@ class Jp2HeaderInspection {
       fail("The JP2 file contains no codestream box.");
     }
     const image = this.image(header, children, codestreams[0]);
+    return { children, image, codestream: codestreams[0] };
+  }
+
+  inspect(mode) {
+    const { children, image } = this.header();
     const colors = this.color(children);
     if (mode === 0) {
       return {
@@ -421,20 +426,43 @@ class Jp2HeaderInspection {
   }
 }
 
+function headerInspection(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length > 4 * 1024 * 1024) {
+    unknown("The original JPEG 2000 bytes exceed the supported input limit.");
+  }
+  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 79) {
+    unknown(
+      "A raw JPEG 2000 codestream is outside the supported JP2 wrapper inspection."
+    );
+  }
+  return new Jp2HeaderInspection(bytes);
+}
+
+function getJpxCodestream(bytes) {
+  try {
+    const { codestream } = headerInspection(bytes).header();
+    return {
+      status: "pass",
+      detail: "The first original JP2 codestream is bounded by its container.",
+      bytes: bytes.subarray(codestream.data, codestream.end),
+    };
+  } catch (error) {
+    return {
+      status: error instanceof JpxFinding ? error.status : "unknown",
+      detail:
+        error instanceof JpxFinding
+          ? error.message
+          : "The original JP2 codestream boundaries could not be established.",
+    };
+  }
+}
+
 function inspectJpxAlpha(bytes, mode) {
   try {
-    if (!(bytes instanceof Uint8Array) || bytes.length > 4 * 1024 * 1024) {
-      unknown("The original JPEG 2000 bytes exceed the supported input limit.");
-    }
     if (![0, 1, 2].includes(mode)) {
       unknown("The embedded alpha mode could not be established.");
     }
-    if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 79) {
-      unknown(
-        "A raw JPEG 2000 codestream does not establish JP2 alpha channel mapping."
-      );
-    }
-    return new Jp2HeaderInspection(bytes).inspect(mode);
+    return headerInspection(bytes).inspect(mode);
   } catch (error) {
     if (error instanceof JpxFinding) {
       return { status: error.status, detail: error.message, transparent: null };
@@ -447,4 +475,4 @@ function inspectJpxAlpha(bytes, mode) {
   }
 }
 
-export { inspectJpxAlpha };
+export { getJpxCodestream, inspectJpxAlpha };
