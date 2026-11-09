@@ -24,6 +24,8 @@ const QCD = 0xff5c,
   RGN = 0xff5e,
   COM = 0xff64;
 const SOT = 0xff90,
+  SOP = 0xff91,
+  EPH = 0xff92,
   SOD = 0xff93,
   EOC = 0xffd9;
 const OPTIONAL = new Map([
@@ -58,7 +60,12 @@ class CodestreamInspection {
   constructor(bytes) {
     this.bytes = bytes;
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    this.counts = { headerSegments: 0, tileParts: 0, tiles: 0 };
+    this.counts = {
+      headerSegments: 0,
+      tileParts: 0,
+      tiles: 0,
+      openEndedTileParts: 0,
+    };
     this.tiles = new Map();
     this.pending = null;
     this.main = null;
@@ -264,6 +271,7 @@ class CodestreamInspection {
   header(offset, main, part = 0, limit = this.bytes.length) {
     const state = {
       cod: null,
+      codFlags: null,
       qcd: null,
       coc: new Map(),
       qcc: new Map(),
@@ -314,6 +322,7 @@ class CodestreamInspection {
           fail("A header contains multiple default coding style markers.");
         }
         state.cod = this.coding(segment);
+        state.codFlags = this.bytes[segment.data];
       } else if (marker === COC) {
         const component = this.component(segment);
         if (state.coc.has(component.index)) {
@@ -408,6 +417,67 @@ class CodestreamInspection {
     }
   }
 
+  finalTilePart(offset, flags) {
+    const end = this.bytes.length - 2;
+    // T.800 C.3.4 reserves FF followed by a byte > 8F for markers.
+    // Lower values are coded data, including bytes resembling header markers.
+    // This establishes framing only, without interpreting packet boundaries.
+    while (offset < this.bytes.length) {
+      if (this.bytes[offset] !== 255) {
+        offset++;
+        continue;
+      }
+      if (offset + 1 >= this.bytes.length) {
+        fail("The open-ended tile-part ends with an incomplete marker.");
+      }
+      const code = this.bytes[offset + 1];
+      if (code <= 0x8f) {
+        offset += 2;
+        continue;
+      }
+      const marker = this.view.getUint16(offset);
+      if (marker === EOC) {
+        if (offset !== end) {
+          fail("EOC occurs before the end of the open-ended final tile-part.");
+        }
+        return offset;
+      }
+      if (marker === SOT || marker === SOD) {
+        fail(
+          "An open-ended tile-part must be final and cannot contain SOT or SOD."
+        );
+      }
+      if (code === 255) {
+        unknown(
+          "Consecutive FF bytes cannot establish a final marker boundary without interpreting truncated packet data."
+        );
+      }
+      if (marker === SOP) {
+        if (!(flags & 2)) {
+          fail("SOP is not permitted by the effective tile coding style.");
+        }
+        if (offset + 6 > end || this.view.getUint16(offset + 2) !== 4) {
+          fail("The open-ended tile-part has a truncated SOP or invalid Lsop.");
+        }
+        // Nsop is an opaque 16-bit value here. SOP need not occur on every
+        // packet, so observed values need not be consecutive or start at zero.
+        offset += 6;
+        continue;
+      }
+      if (marker === EPH) {
+        if (!(flags & 4)) {
+          fail("EPH is not permitted by the effective tile coding style.");
+        }
+        offset += 2;
+        continue;
+      }
+      unknown(
+        "An extension or reserved marker prevents open-ended tile-part framing inspection."
+      );
+    }
+    return fail("The open-ended tile-part has no terminating EOC marker.");
+  }
+
   inspect() {
     const length = this.bytes.length;
     if (length < 4 || this.marker(0) !== SOC) {
@@ -441,7 +511,7 @@ class CodestreamInspection {
           status: this.pending ? "unknown" : "pass",
           detail:
             this.pending ??
-            "Main and tile-part marker fields, declared boundaries and final EOC were checked without decoding packets.",
+            "Main and tile-part marker fields, declared or scanned final boundaries and final EOC were checked without decoding packets.",
           counts: this.counts,
         };
       }
@@ -485,10 +555,13 @@ class CodestreamInspection {
       }
       const parsed = this.header(segment.end, false, part, end);
       offset = parsed.offset + 2;
+      if (part === 0) {
+        tile.flags = parsed.state.codFlags ?? this.main.codFlags;
+      }
       if (size === 0) {
-        unknown(
-          "An open-ended final tile-part cannot be verified without parsing packet data."
-        );
+        this.counts.openEndedTileParts++;
+        offset = this.finalTilePart(offset, tile.flags);
+        continue;
       }
       if (end < offset || end > length - 2) {
         fail(

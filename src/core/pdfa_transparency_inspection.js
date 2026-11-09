@@ -86,6 +86,7 @@ class TransparencyInspection {
       jpxCodestreams: 0,
       jpxHeaderSegments: 0,
       jpxTileParts: 0,
+      jpxOpenEndedTileParts: 0,
     };
   }
 
@@ -933,6 +934,8 @@ class TransparencyInspection {
       this.counts.jpxHeaderSegments +=
         evidence.codestream.counts?.headerSegments || 0;
       this.counts.jpxTileParts += evidence.codestream.counts?.tileParts || 0;
+      this.counts.jpxOpenEndedTileParts +=
+        evidence.codestream.counts?.openEndedTileParts || 0;
     }
     const result = evidence.codestream;
     this.note(CODESTREAM, result.status, path + "/Codestream", result.detail);
