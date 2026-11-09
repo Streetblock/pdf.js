@@ -191,20 +191,21 @@ class ColorInspection {
     }
   }
 
-  useTransparency(evidence) {
+  useTransparency(evidence, path) {
     if (
       this.pageUse &&
       this.pageUse.transparent !== true &&
       evidence !== false
     ) {
       this.pageUse.transparent = evidence;
+      this.pageUse.location = path;
     }
   }
 
   unavailable(path, detail) {
     this.unknown(path, detail);
     this.transparency.unknown(path, detail, !this.pageUse);
-    this.useTransparency(UNKNOWN);
+    this.useTransparency(UNKNOWN, path);
   }
 
   take(path, depth) {
@@ -659,13 +660,13 @@ class ColorInspection {
       (typeof alpha === "number" && alpha < 1) ||
       activeMask
     ) {
-      this.useTransparency(true);
+      this.useTransparency(true, path);
     } else if (
       state.blend === UNKNOWN ||
       alpha === UNKNOWN ||
       mask === UNKNOWN
     ) {
-      this.useTransparency(UNKNOWN);
+      this.useTransparency(UNKNOWN, path);
     }
     if (!activeMask) {
       return;
@@ -704,9 +705,9 @@ class ColorInspection {
       const mask = this.get(obj.dict, "ImageMask");
       const ownMask = await this.transparency.image(obj.dict, resources, path);
       const hardMask = this.get(obj.dict, "Mask");
-      this.useTransparency(ownMask);
+      this.useTransparency(ownMask, path);
       if (hardMask === UNKNOWN) {
-        this.useTransparency(UNKNOWN);
+        this.useTransparency(UNKNOWN, path);
       }
       const overrides =
         ownMask !== false ||
@@ -729,8 +730,13 @@ class ColorInspection {
       }
       return;
     }
+    await this.form(obj, type, state, path, depth);
+  }
+
+  async form(obj, type, state, path, depth) {
+    const appearance = state === null;
     if (
-      !isName(type, "Form") ||
+      (!isName(type, "Form") && !(appearance && absent(type))) ||
       !absent(this.get(obj.dict, "Ref")) ||
       this.forms.has(obj) ||
       !this.take(path, depth)
@@ -742,7 +748,10 @@ class ColorInspection {
       return;
     }
     const entry = this.get(obj.dict, "Resources");
-    const local = absent(entry) ? state.pageResources : entry;
+    const local = absent(entry) ? state?.pageResources : entry;
+    // An appearance is independently composited and has its own resource scope.
+    // Nested Forms in this scope cannot borrow resources from the page.
+    state ??= this.initialState(local, null);
     await this.resources(local, at(path, "Resources"));
     this.forms.add(obj);
     try {
@@ -755,7 +764,7 @@ class ColorInspection {
       const group = await this.transparency.group(obj.dict, local, path, kind);
       const child = { ...state, maskSubtype: null };
       if (group.status !== "absent") {
-        this.useTransparency(group.status === "pass" ? true : UNKNOWN);
+        this.useTransparency(group.status === "pass" ? true : UNKNOWN, path);
         await this.composite(state, "fill", path, depth);
         Object.assign(child, OPAQUE);
         if (group.hasColor === true && !state.ignoreColors) {
@@ -764,6 +773,9 @@ class ColorInspection {
       }
       const bytes = await this.bytes(obj);
       if (bytes) {
+        if (appearance) {
+          this.transparency.counts.annotationAppearances++;
+        }
         await this.content(bytes, local, child, path, depth);
       } else {
         this.unavailable(path, "Form content could not be read.");
@@ -1016,6 +1028,7 @@ class ColorInspection {
     this.counts.pages++;
     this.pageUse = {
       transparent: false,
+      location: null,
       masks: new Set(),
     };
     try {
@@ -1029,39 +1042,148 @@ class ColorInspection {
         await this.paint(group.color, at(path, "Group/CS"));
       }
       await this.pageContents(node, resources, path, depth);
+      await this.annotations(node, at(path, "Annots"), depth + 1);
       this.transparency.page(
         group,
         this.pageUse.transparent,
         this.output,
-        path
+        this.pageUse.location ?? path
       );
     } finally {
       this.pageUse = null;
     }
   }
 
-  async pageContents(node, resources, path, depth) {
-    await this.resources(resources, at(path, "Resources"));
-    const annotations = this.get(node, "Annots");
+  initialState(resources, pageResources = resources) {
+    const gray = { device: DEVICES.get("DeviceGray"), resources };
+    return {
+      ...OPAQUE,
+      fill: gray,
+      stroke: gray,
+      mode: 0,
+      font: null,
+      pageResources,
+    };
+  }
+
+  isButtonWidget(annotation) {
+    if (!isName(this.get(annotation, "Subtype"), "Widget")) {
+      return false;
+    }
+    let field = annotation;
+    for (let depth = 0; field instanceof Dict && depth <= MAX_DEPTH; depth++) {
+      const type = this.get(field, "FT");
+      if (!absent(type)) {
+        return isName(type, "Btn");
+      }
+      field = this.get(field, "Parent");
+    }
+    return false;
+  }
+
+  async appearance(raw, path, depth) {
+    const stream = this.resolve(raw);
+    if (!(stream instanceof BaseStream)) {
+      this.unavailable(
+        path,
+        "The normal annotation appearance is not a readable stream."
+      );
+      return;
+    }
+    await this.form(
+      stream,
+      this.get(stream.dict, "Subtype"),
+      null,
+      path,
+      depth
+    );
+  }
+
+  async annotation(annotation, path, depth) {
+    if (!(annotation instanceof Dict)) {
+      this.unavailable(path, "The annotation dictionary could not be read.");
+      return;
+    }
+    const ap = this.get(annotation, "AP");
+    if (absent(ap)) {
+      if (
+        !absent(this.get(annotation, "CA")) ||
+        !absent(this.get(annotation, "C")) ||
+        !absent(this.get(annotation, "IC"))
+      ) {
+        this.unavailable(
+          path,
+          "The annotation has no stored appearance to inspect."
+        );
+      }
+      return;
+    }
+    path = at(path, "AP");
+    if (!(ap instanceof Dict)) {
+      this.unavailable(
+        path,
+        "The annotation appearance dictionary could not be read."
+      );
+      return;
+    }
+    // PDF/A permits only the normal appearance here. The document rules
+    // inspect additional appearance keys separately.
+    const normal = this.get(ap, "N");
+    path = at(path, "N");
+    if (!(normal instanceof Dict)) {
+      await this.appearance(normal, path, depth + 1);
+      return;
+    }
+    const selected = this.get(annotation, "AS");
     if (
-      !absent(annotations) &&
-      (!Array.isArray(annotations) ||
-        annotations.length > MAX_ITEMS ||
-        annotations.some(rawAnnot => {
-          const annotation = this.resolve(rawAnnot);
-          return (
-            !(annotation instanceof Dict) ||
-            !absent(this.get(annotation, "AP")) ||
-            !absent(this.get(annotation, "CA")) ||
-            !absent(this.get(annotation, "C"))
-          );
-        }))
+      !this.isButtonWidget(annotation) ||
+      !(selected instanceof Name) ||
+      !(this.get(normal, selected.name) instanceof BaseStream)
     ) {
       this.unavailable(
-        at(path, "Annots"),
-        "Annotation appearances are outside this inspection."
+        path,
+        "A normal button appearance state could not be established."
       );
+      return;
     }
+    // Every defined normal button state can be displayed or printed.
+    let states = 0;
+    for (const [name, raw] of normal.getRawEntries()) {
+      if (++states > MAX_ITEMS || this.items <= 0) {
+        this.unavailable(
+          path,
+          "The appearance state inspection reached its limit."
+        );
+        return;
+      }
+      await this.appearance(raw, at(path, name), depth + 1);
+    }
+  }
+
+  async annotations(node, path, depth) {
+    const entries = this.get(node, "Annots");
+    if (absent(entries)) {
+      return;
+    }
+    if (!Array.isArray(entries) || entries.length > MAX_ITEMS) {
+      this.unavailable(path, "The page annotations could not be fully read.");
+      return;
+    }
+    for (let i = 0; i < entries.length; i++) {
+      const location = path + "[" + i + "]";
+      if (!this.take(location, depth)) {
+        this.unavailable(
+          location,
+          "The annotation inspection reached its limit."
+        );
+        return;
+      }
+      await this.annotation(this.resolve(entries[i]), location, depth);
+    }
+  }
+
+  async pageContents(node, resources, path, depth) {
+    await this.resources(resources, at(path, "Resources"));
     const contents = this.get(node, "Contents");
     if (absent(contents)) {
       return;
@@ -1089,18 +1211,10 @@ class ColorInspection {
         offset += bytes.length;
       }
     }
-    const gray = { device: DEVICES.get("DeviceGray"), resources };
     await this.content(
       combined,
       resources,
-      {
-        ...OPAQUE,
-        fill: gray,
-        stroke: gray,
-        mode: 0,
-        font: null,
-        pageResources: resources,
-      },
+      this.initialState(resources),
       at(path, "Contents"),
       depth
     );

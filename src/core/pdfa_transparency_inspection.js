@@ -67,6 +67,7 @@ class TransparencyInspection {
     this.maskImages = new Set();
     this.counts = {
       transparentPages: 0,
+      annotationAppearances: 0,
       groups: 0,
       graphicsStates: 0,
       softMasks: 0,
